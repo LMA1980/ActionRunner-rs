@@ -102,6 +102,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/cards/{owner}/{repo}/{branch}/card.svg",
             get(get_branch_card),
         )
+        // Submodule Badges & Cards
+        .route(
+            "/badges/{owner}/{repo}/submodules/{submodule}/status.svg",
+            get(get_submodule_badge),
+        )
+        .route(
+            "/badges/{owner}/{repo}/{branch}/submodules/{submodule}/status.svg",
+            get(get_branch_submodule_badge),
+        )
+        .route(
+            "/badges/{owner}/{repo}/submodules/{submodule}/score.svg",
+            get(get_submodule_score_badge),
+        )
+        .route(
+            "/badges/{owner}/{repo}/{branch}/submodules/{submodule}/score.svg",
+            get(get_branch_submodule_score_badge),
+        )
+        .route(
+            "/badges/{owner}/{repo}/submodules/{submodule}/coverage.svg",
+            get(get_submodule_coverage_badge),
+        )
+        .route(
+            "/badges/{owner}/{repo}/{branch}/submodules/{submodule}/coverage.svg",
+            get(get_branch_submodule_coverage_badge),
+        )
+        .route(
+            "/badges/{owner}/{repo}/submodules/{submodule}/benchmark.svg",
+            get(get_submodule_benchmark_badge),
+        )
+        .route(
+            "/badges/{owner}/{repo}/{branch}/submodules/{submodule}/benchmark.svg",
+            get(get_branch_submodule_benchmark_badge),
+        )
+        .route(
+            "/cards/{owner}/{repo}/submodules/{submodule}/card.svg",
+            get(get_submodule_card),
+        )
+        .route(
+            "/cards/{owner}/{repo}/{branch}/submodules/{submodule}/card.svg",
+            get(get_branch_submodule_card),
+        )
         .route("/", get(health_check))
         .with_state(state);
 
@@ -378,6 +419,10 @@ async fn get_branch_benchmark_badge(
         .find_latest_job(&repo_full, Some(&branch))
         .await;
     let svg = badge::render_benchmark_badge(record.as_ref());
+    svg_response(svg)
+}
+
+fn svg_response(svg: String) -> Response {
     (
         [
             (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
@@ -386,4 +431,140 @@ async fn get_branch_benchmark_badge(
         svg,
     )
         .into_response()
+}
+
+async fn get_submodule_badge(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, submodule)): Path<(String, String, String)>,
+) -> Response {
+    let parent_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_submodule_job(&parent_full, &submodule, None)
+        .await;
+    let svg = badge::render_status_badge("k3-ci", record.as_ref());
+    svg_response(svg)
+}
+
+async fn get_branch_submodule_badge(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, branch, submodule)): Path<(String, String, String, String)>,
+) -> Response {
+    let parent_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_submodule_job(&parent_full, &submodule, Some(&branch))
+        .await;
+    let svg = badge::render_status_badge("k3-ci", record.as_ref());
+    svg_response(svg)
+}
+
+async fn get_submodule_score_badge(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, submodule)): Path<(String, String, String)>,
+) -> Response {
+    let parent_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_submodule_job(&parent_full, &submodule, None)
+        .await;
+    let svg = badge::render_score_badge(record.as_ref());
+    svg_response(svg)
+}
+
+async fn get_branch_submodule_score_badge(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, branch, submodule)): Path<(String, String, String, String)>,
+) -> Response {
+    let parent_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_submodule_job(&parent_full, &submodule, Some(&branch))
+        .await;
+    let svg = badge::render_score_badge(record.as_ref());
+    svg_response(svg)
+}
+
+async fn get_submodule_coverage_badge(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, submodule)): Path<(String, String, String)>,
+) -> Response {
+    let parent_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_submodule_job(&parent_full, &submodule, None)
+        .await;
+    let svg = badge::render_coverage_badge(record.as_ref());
+    svg_response(svg)
+}
+
+async fn get_branch_submodule_coverage_badge(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, branch, submodule)): Path<(String, String, String, String)>,
+) -> Response {
+    let parent_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_submodule_job(&parent_full, &submodule, Some(&branch))
+        .await;
+    let svg = badge::render_coverage_badge(record.as_ref());
+    svg_response(svg)
+}
+
+async fn get_submodule_benchmark_badge(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, submodule)): Path<(String, String, String)>,
+) -> Response {
+    let parent_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_submodule_job(&parent_full, &submodule, None)
+        .await;
+    let svg = badge::render_benchmark_badge(record.as_ref());
+    svg_response(svg)
+}
+
+async fn get_branch_submodule_benchmark_badge(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, branch, submodule)): Path<(String, String, String, String)>,
+) -> Response {
+    let parent_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_submodule_job(&parent_full, &submodule, Some(&branch))
+        .await;
+    let svg = badge::render_benchmark_badge(record.as_ref());
+    svg_response(svg)
+}
+
+async fn get_submodule_card(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, submodule)): Path<(String, String, String)>,
+) -> Response {
+    let parent_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_submodule_job(&parent_full, &submodule, None)
+        .await;
+    let sub_name = format!("{}/{}", owner, submodule);
+    let branch = record
+        .as_ref()
+        .map(|r| r.job.ref_name.trim_start_matches("refs/heads/").to_string())
+        .unwrap_or_else(|| "main".to_string());
+    let svg = badge::render_card_svg(&sub_name, &branch, record.as_ref());
+    svg_response(svg)
+}
+
+async fn get_branch_submodule_card(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, branch, submodule)): Path<(String, String, String, String)>,
+) -> Response {
+    let parent_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_submodule_job(&parent_full, &submodule, Some(&branch))
+        .await;
+    let sub_name = format!("{}/{}", owner, submodule);
+    let svg = badge::render_card_svg(&sub_name, &branch, record.as_ref());
+    svg_response(svg)
 }

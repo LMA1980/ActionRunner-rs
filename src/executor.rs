@@ -657,6 +657,62 @@ impl Executor {
             }
         }
 
+        // Submodule Discovery from .gitmodules
+        let gitmodules_path = repo_workspace.join(".gitmodules");
+        let mut submodules_info: Vec<(String, String, String, String)> = Vec::new();
+        if gitmodules_path.exists() {
+            if let Ok(content) = tokio::fs::read_to_string(&gitmodules_path).await {
+                let mut curr_path = String::new();
+                let mut curr_url = String::new();
+                let mut curr_name = String::new();
+
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.starts_with("[submodule ") {
+                        if !curr_path.is_empty() {
+                            let folder_name = curr_path.rsplit_once('/').map(|(_, f)| f).unwrap_or(&curr_path).to_string();
+                            let name = if !curr_url.is_empty() {
+                                curr_url.trim_end_matches(".git").rsplit_once(&['/', ':'][..]).map(|(_, n)| n).unwrap_or(&folder_name).to_string()
+                            } else if !curr_name.is_empty() {
+                                curr_name.clone()
+                            } else {
+                                folder_name.clone()
+                            };
+                            let crate_name = name.replace('-', "_");
+                            submodules_info.push((name, curr_path.clone(), crate_name, folder_name));
+                        }
+                        curr_path.clear();
+                        curr_url.clear();
+                        if let Some(n) = line.strip_prefix("[submodule \"").and_then(|s| s.strip_suffix("\"]")) {
+                            curr_name = n.rsplit_once('/').map(|(_, f)| f).unwrap_or(n).to_string();
+                        } else {
+                            curr_name.clear();
+                        }
+                    } else if let Some((k, v)) = line.split_once('=') {
+                        let k = k.trim();
+                        let v = v.trim().trim_matches('"');
+                        if k == "path" {
+                            curr_path = v.to_string();
+                        } else if k == "url" {
+                            curr_url = v.to_string();
+                        }
+                    }
+                }
+                if !curr_path.is_empty() {
+                    let folder_name = curr_path.rsplit_once('/').map(|(_, f)| f).unwrap_or(&curr_path).to_string();
+                    let name = if !curr_url.is_empty() {
+                        curr_url.trim_end_matches(".git").rsplit_once(&['/', ':'][..]).map(|(_, n)| n).unwrap_or(&folder_name).to_string()
+                    } else if !curr_name.is_empty() {
+                        curr_name
+                    } else {
+                        folder_name.clone()
+                    };
+                    let crate_name = name.replace('-', "_");
+                    submodules_info.push((name, curr_path, crate_name, folder_name));
+                }
+            }
+        }
+
         // Auto-derive metrics from execution log file
         let log_content = tokio::fs::read_to_string(log_file_path)
             .await
@@ -669,17 +725,52 @@ impl Executor {
         let mut advisories_count = 0;
         let mut clippy_warnings = 0;
 
+        let mut sub_tests_passed: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut sub_tests_total: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut sub_bench_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut sub_bench_time: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut sub_cov_lines_exec: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut sub_cov_lines_total: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut sub_clippy_warnings: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+
+        let mut current_target_sub: Option<String> = None;
+
         for line in log_content.lines() {
+            // Track active submodule test/bench suite
+            if line.contains("Running unittests") || line.contains("Running benches/") || line.contains("Running tests/") {
+                let mut matched_sub = None;
+                for (name, path, crate_name, folder_name) in &submodules_info {
+                    if line.contains(&format!("deps/{}-", crate_name))
+                        || line.contains(&format!("deps/{}_", crate_name))
+                        || line.contains(&format!("/{}/", folder_name))
+                        || line.contains(&format!("{}-", name))
+                        || line.contains(&format!("{}/", path))
+                        || line.contains(folder_name)
+                    {
+                        matched_sub = Some(name.clone());
+                        break;
+                    }
+                }
+                if matched_sub.is_some() {
+                    current_target_sub = matched_sub;
+                } else if line.contains("Running unittests") {
+                    current_target_sub = None;
+                }
+            }
+
             // Test results: "test result: ok. 4 passed; 0 failed; ..."
             if line.contains("test result: ok.") || line.contains("test result: FAILED.") {
+                let mut p = 0u32;
+                let mut f = 0u32;
                 if let Some(passed_str) = line
                     .split("passed;")
                     .next()
                     .and_then(|s| s.split_whitespace().last())
                 {
-                    if let Ok(p) = passed_str.parse::<u32>() {
-                        tests_passed += p;
-                        tests_total += p;
+                    if let Ok(val) = passed_str.parse::<u32>() {
+                        p = val;
+                        tests_passed += val;
+                        tests_total += val;
                     }
                 }
                 if let Some(failed_part) = line.split("passed;").nth(1) {
@@ -688,23 +779,39 @@ impl Executor {
                         .next()
                         .and_then(|s| s.split_whitespace().last())
                     {
-                        if let Ok(f) = failed_str.parse::<u32>() {
-                            tests_total += f;
+                        if let Ok(val) = failed_str.parse::<u32>() {
+                            f = val;
+                            tests_total += val;
                         }
                     }
+                }
+                if let Some(ref sub) = current_target_sub {
+                    *sub_tests_passed.entry(sub.clone()).or_insert(0) += p;
+                    *sub_tests_total.entry(sub.clone()).or_insert(0) += p + f;
                 }
             }
 
             // Benchmark results from `cargo bench`: "test bench_name ... bench: 12,345 ns/iter"
             if line.contains("... bench:") {
                 bench_count += 1;
-                if let Some(time_part) = line.split("... bench:").nth(1) {
-                    bench_last_time = time_part
+                let time = if let Some(time_part) = line.split("... bench:").nth(1) {
+                    time_part
                         .split("(+/-")
                         .next()
                         .unwrap_or(time_part)
                         .trim()
-                        .to_string();
+                        .to_string()
+                } else {
+                    String::new()
+                };
+                if bench_last_time.is_empty() && !time.is_empty() {
+                    bench_last_time = time.clone();
+                }
+                if let Some(ref sub) = current_target_sub {
+                    *sub_bench_count.entry(sub.clone()).or_insert(0) += 1;
+                    if !time.is_empty() {
+                        sub_bench_time.insert(sub.clone(), time);
+                    }
                 }
             }
 
@@ -720,9 +827,40 @@ impl Executor {
                 }
             }
 
+            // Submodule line coverage from llvm-cov tabular output
+            if line.contains(".rs") && (line.contains('%') || line.contains("100.00%")) {
+                let tokens: Vec<&str> = line.split_whitespace().collect();
+                if tokens.len() >= 9 {
+                    let filename = tokens[0];
+                    for (name, path, _crate_name, folder_name) in &submodules_info {
+                        let p1 = format!("{}/", folder_name);
+                        let p2 = format!("{}/", path);
+                        if filename.starts_with(&p1) || filename.starts_with(&p2) || filename.contains(&format!("/{}/", folder_name)) {
+                            if let (Ok(tot), Ok(missed)) = (tokens[7].parse::<u32>(), tokens[8].parse::<u32>()) {
+                                let exec = tot.saturating_sub(missed);
+                                *sub_cov_lines_total.entry(name.clone()).or_insert(0) += tot;
+                                *sub_cov_lines_exec.entry(name.clone()).or_insert(0) += exec;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
             // Clippy warning count
-            if line.contains("warning: ") && line.contains("[-D clippy::") {
-                clippy_warnings += 1;
+            if line.contains("warning: ") {
+                if line.contains("[-D clippy::") {
+                    clippy_warnings += 1;
+                }
+                for (name, _path, crate_name, folder_name) in &submodules_info {
+                    if line.contains(&format!("`{}`", name))
+                        || line.contains(&format!("`{}`", crate_name))
+                        || line.contains(&format!("`{}`", folder_name))
+                    {
+                        *sub_clippy_warnings.entry(name.clone()).or_insert(0) += 1;
+                        break;
+                    }
+                }
             }
 
             // Cargo audit security advisories
@@ -776,6 +914,72 @@ impl Executor {
             _ => "F".to_string(),
         };
 
+        // Compute Submodule Scores & Grades
+        let mut submodules = std::collections::BTreeMap::new();
+        for (name, path, _crate_name, _folder_name) in &submodules_info {
+            let p = *sub_tests_passed.get(name).unwrap_or(&0);
+            let tot = *sub_tests_total.get(name).unwrap_or(&0);
+            let clip = *sub_clippy_warnings.get(name).unwrap_or(&0);
+            let cov = if let (Some(&exec), Some(&total)) = (sub_cov_lines_exec.get(name), sub_cov_lines_total.get(name)) {
+                if total > 0 {
+                    Some(((exec as f64 / total as f64) * 1000.0).round() / 10.0)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let bench = sub_bench_count.get(name).map(|&c| {
+                if let Some(t) = sub_bench_time.get(name) {
+                    format!("{} benches ({})", c, t)
+                } else {
+                    format!("{} benches passed", c)
+                }
+            });
+
+            let sub_score = if is_success {
+                let mut s = 100u32;
+                if clip > 0 {
+                    s = s.saturating_sub((clip * 5).min(20));
+                }
+                if tot > 0 && p < tot {
+                    let fail_ratio = (tot - p) as f64 / tot as f64;
+                    s = s.saturating_sub((fail_ratio * 40.0) as u32);
+                }
+                if let Some(c) = cov {
+                    if c < 80.0 {
+                        s = s.saturating_sub(((80.0 - c) * 0.5) as u32);
+                    }
+                }
+                s.max(1)
+            } else {
+                40u32
+            };
+
+            let sub_grade = match sub_score {
+                95..=100 => "A+".to_string(),
+                90..=94 => "A".to_string(),
+                80..=89 => "B".to_string(),
+                70..=79 => "C".to_string(),
+                _ => "F".to_string(),
+            };
+
+            submodules.insert(
+                name.clone(),
+                crate::job::SubmoduleMetrics {
+                    name: name.clone(),
+                    path: path.clone(),
+                    quality_score: sub_score,
+                    letter_grade: sub_grade,
+                    tests_passed: p,
+                    tests_total: tot,
+                    coverage_pct: cov,
+                    benchmark_summary: bench,
+                    clippy_warnings: clip,
+                },
+            );
+        }
+
         JobMetrics {
             quality_score,
             letter_grade,
@@ -785,6 +989,7 @@ impl Executor {
             tests_total,
             advisories_count,
             clippy_warnings,
+            submodules,
         }
     }
 }
@@ -1116,6 +1321,90 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&rev_out.stdout).trim(), c1);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_extract_submodule_metrics() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "actionrunner-metrics-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let gitmodules_content = r#"[submodule "code/core"]
+	path = code/core
+	url = https://github.com/LMA1980/k3-core.git
+[submodule "code/engine"]
+	path = code/engine
+	url = https://github.com/LMA1980/k3-engine.git
+"#;
+        std::fs::write(temp_dir.join(".gitmodules"), gitmodules_content).unwrap();
+
+        let log_content = r#"
+Running unittests src/lib.rs (target/release/deps/k3_core-12345)
+test tests::test_tensor ... ok
+test tests::test_matrix ... ok
+test tests::test_shape ... ok
+test tests::test_grad ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+Running benches/tensor_bench.rs (target/release/deps/tensor_bench-6789)
+test tensor_view_from_bytes ... bench: 49.0 ns/iter (+/- 2.1)
+
+Running unittests src/lib.rs (target/release/deps/k3_engine-9999)
+test tests::test_inference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+Filename                     Regions    Missed Regions     Cover   Functions  Missed Functions  Executed       Lines      Missed Lines     Cover    Branches   Missed Branches     Cover
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+core/src/tensor.rs                20                 2    90.00%           5                 0   100.00%          50                 5    90.00%           0                 0         -
+engine/src/lib.rs                 10                 0   100.00%           2                 0   100.00%          25                 0   100.00%           0                 0         -
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+TOTAL                             30                 2    93.33%           7                 0   100.00%          75                 5    93.33%           0                 0         -
+"#;
+        let log_path = temp_dir.join("job.log");
+        std::fs::write(&log_path, log_content).unwrap();
+
+        let config = Config {
+            bind_addr: "127.0.0.1:0".to_string(),
+            webhook_secret: None,
+            workspace_dir: temp_dir.clone(),
+            allowed_repositories: vec!["*".to_string()],
+            job_timeout_seconds: 60,
+        };
+        let job_store = JobStore::new(10, None);
+        let executor = Executor::new(config, job_store);
+
+        let metrics = executor.extract_or_compute_metrics(&temp_dir, &log_path, true).await;
+
+        assert_eq!(metrics.tests_passed, 5);
+        assert_eq!(metrics.tests_total, 5);
+        assert_eq!(metrics.quality_score, 100);
+        assert_eq!(metrics.letter_grade, "A+");
+
+        assert_eq!(metrics.submodules.len(), 2);
+
+        let core = metrics.submodules.get("k3-core").expect("k3-core submodule missing");
+        assert_eq!(core.tests_passed, 4);
+        assert_eq!(core.tests_total, 4);
+        assert_eq!(core.quality_score, 100);
+        assert_eq!(core.letter_grade, "A+");
+        assert_eq!(core.coverage_pct, Some(90.0));
+        assert!(core.benchmark_summary.as_ref().unwrap().contains("49.0 ns/iter"));
+
+        let engine = metrics.submodules.get("k3-engine").expect("k3-engine submodule missing");
+        assert_eq!(engine.tests_passed, 1);
+        assert_eq!(engine.tests_total, 1);
+        assert_eq!(engine.quality_score, 100);
+        assert_eq!(engine.letter_grade, "A+");
+        assert_eq!(engine.coverage_pct, Some(100.0));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

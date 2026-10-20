@@ -120,8 +120,27 @@ pub fn render_status_badge(label: &str, record: Option<&JobRecord>) -> String {
     render_flat_badge(label, info.status_text, info.color_hex)
 }
 
-/// Generates a dedicated overall Score Badge (e.g. `[ k3 score | 100% A+ ]`)
+/// Generates a dedicated overall Score Badge (e.g. `[ k3 score | 100% A+ ]` or `[ <repo> score | 100% A+ ]`)
 pub fn render_score_badge(record: Option<&JobRecord>) -> String {
+    let label = if let Some(r) = record {
+        let repo_clean = r
+            .job
+            .repo_name
+            .rsplit_once('/')
+            .map(|(_, n)| n)
+            .unwrap_or(&r.job.repo_name);
+        if repo_clean.starts_with("k3-") || repo_clean.starts_with("k3_") {
+            format!("{} score", repo_clean)
+        } else {
+            "k3 score".to_string()
+        }
+    } else {
+        "k3 score".to_string()
+    };
+    render_custom_score_badge(&label, record)
+}
+
+pub fn render_custom_score_badge(label: &str, record: Option<&JobRecord>) -> String {
     match record.and_then(|r| r.metrics.as_ref()) {
         Some(m) => {
             let status = format!("{}% {}", m.quality_score, m.letter_grade);
@@ -131,14 +150,14 @@ pub fn render_score_badge(record: Option<&JobRecord>) -> String {
                 70..=79 => "#dbab09",
                 _ => "#cb2431",
             };
-            render_flat_badge("k3 score", &status, color)
+            render_flat_badge(label, &status, color)
         }
         None => {
             let info = evaluate_status(record);
             if info.status_text == "passing" {
-                render_flat_badge("k3 score", "100% A+", "#2ea44f")
+                render_flat_badge(label, "100% A+", "#2ea44f")
             } else {
-                render_flat_badge("k3 score", info.status_text, info.color_hex)
+                render_flat_badge(label, info.status_text, info.color_hex)
             }
         }
     }
@@ -329,8 +348,64 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
 
     let status_uppercase = info.status_text.to_uppercase();
 
+    let has_submodules = metrics_opt.map(|m| !m.submodules.is_empty()).unwrap_or(false);
+    let card_height = if has_submodules { 220 } else { 185 };
+
+    let submodules_svg = if let Some(m) = metrics_opt {
+        if !m.submodules.is_empty() {
+            let mut items_svg = String::new();
+            let mut curr_x = 100;
+            for (idx, (sub_name, sub)) in m.submodules.iter().enumerate() {
+                if idx >= 3 {
+                    break;
+                }
+                let pill_color = match sub.quality_score {
+                    90..=100 => "#2ea44f",
+                    80..=89 => "#85e89d",
+                    70..=79 => "#dbab09",
+                    _ => "#cb2431",
+                };
+                let display_name = sub_name.rsplit_once('/').map(|(_, n)| n).unwrap_or(sub_name);
+                let score_str = format!("{}% {}", sub.quality_score, sub.letter_grade);
+                let pill_w = 125;
+                items_svg.push_str(&format!(
+                    r###"  <rect x="{x}" y="127" width="{w}" height="20" rx="4" class="tile-bg"/>
+  <text x="{name_x}" y="141" class="value" fill="#58a6ff">{name}</text>
+  <text x="{score_x}" y="141" text-anchor="end" class="value mono" fill="{color}" font-weight="700">{score}</text>
+"###,
+                    x = curr_x,
+                    w = pill_w,
+                    name_x = curr_x + 8,
+                    name = display_name,
+                    score_x = curr_x + pill_w - 8,
+                    color = pill_color,
+                    score = score_str,
+                ));
+                curr_x += pill_w + 8;
+            }
+
+            format!(
+                r###"  <!-- Submodules Row -->
+  <line x1="20" y1="120" x2="500" y2="120" stroke="#21262d" stroke-width="1"/>
+  <text x="20" y="141" class="tile-label">SUBMODULES</text>
+{items}"###,
+                items = items_svg
+            )
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let (div2_y, row3_y, div3_y, footer_y) = if has_submodules {
+        (154, 172, 186, 202)
+    } else {
+        (126, 144, 156, 172)
+    };
+
     format!(
-        r###"<svg xmlns="http://www.w3.org/2000/svg" width="520" height="185" viewBox="0 0 520 185" fill="none">
+        r###"<svg xmlns="http://www.w3.org/2000/svg" width="520" height="{card_height}" viewBox="0 0 520 {card_height}" fill="none">
   <style>
     .card-bg {{ fill: #0d1117; stroke: #30363d; stroke-width: 1; rx: 8px; }}
     .tile-bg {{ fill: #161b22; stroke: #21262d; stroke-width: 1; rx: 6px; }}
@@ -351,7 +426,7 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
   </style>
 
   <!-- Card Background -->
-  <rect width="520" height="185" class="card-bg"/>
+  <rect width="520" height="{card_height}" class="card-bg"/>
 
   <!-- Header -->
   <text x="20" y="28" class="title">{repo}</text>
@@ -400,26 +475,28 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
   <text x="400" y="83" class="tile-val">{hygiene_val}</text>
   <text x="400" y="98" class="tile-sub">{hygiene_sub}</text>
 
+{submodules_svg}
   <!-- Divider -->
-  <line x1="20" y1="126" x2="500" y2="126" stroke="#21262d" stroke-width="1"/>
+  <line x1="20" y1="{div2_y}" x2="500" y2="{div2_y}" stroke="#21262d" stroke-width="1"/>
 
   <!-- Row 3: Commit, Trigger, Duration, Timestamp -->
-  <text x="20" y="144" class="label">Commit:</text>
-  <text x="65" y="144" class="value mono">{commit_short}</text>
+  <text x="20" y="{row3_y}" class="label">Commit:</text>
+  <text x="65" y="{row3_y}" class="value mono">{commit_short}</text>
 
-  <text x="135" y="144" class="label">Trigger:</text>
-  <text x="178" y="144" class="value">{trigger_text}</text>
+  <text x="135" y="{row3_y}" class="label">Trigger:</text>
+  <text x="178" y="{row3_y}" class="value">{trigger_text}</text>
 
-  <text x="315" y="144" class="label">Duration:</text>
-  <text x="362" y="144" class="value mono">{duration_str}</text>
+  <text x="315" y="{row3_y}" class="label">Duration:</text>
+  <text x="362" y="{row3_y}" class="value mono">{duration_str}</text>
 
-  <text x="405" y="144" class="label">Updated:</text>
-  <text x="450" y="144" class="value">{timestamp_str}</text>
+  <text x="405" y="{row3_y}" class="label">Updated:</text>
+  <text x="450" y="{row3_y}" class="value">{timestamp_str}</text>
 
   <!-- Footer Banner: Native RISC-V Hardware Tag -->
-  <line x1="20" y1="156" x2="500" y2="156" stroke="#21262d" stroke-width="1"/>
-  <text x="20" y="172" class="footer-text">SpacemiT Key Stone K3 (8× X100 RISC-V @ 1.6GHz) • ActionRunner-rs Factory Pipeline</text>
+  <line x1="20" y1="{div3_y}" x2="500" y2="{div3_y}" stroke="#21262d" stroke-width="1"/>
+  <text x="20" y="{footer_y}" class="footer-text">SpacemiT Key Stone K3 (8× X100 RISC-V @ 1.6GHz) • ActionRunner-rs Factory Pipeline</text>
 </svg>"###,
+        card_height = card_height,
         repo = repo,
         branch = branch,
         card_badge_bg = info.card_badge_bg,
@@ -438,6 +515,11 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
         bench_sub = bench_sub,
         hygiene_val = hygiene_val,
         hygiene_sub = hygiene_sub,
+        submodules_svg = submodules_svg,
+        div2_y = div2_y,
+        row3_y = row3_y,
+        div3_y = div3_y,
+        footer_y = footer_y,
         commit_short = commit_short,
         trigger_text = trigger_text,
         duration_str = duration_str,
@@ -503,6 +585,7 @@ mod tests {
                 tests_total: 5,
                 advisories_count: 0,
                 clippy_warnings: 0,
+                submodules: Default::default(),
             }),
         };
 
@@ -530,6 +613,7 @@ mod tests {
                 tests_total: 5,
                 advisories_count: 0,
                 clippy_warnings: 0,
+                submodules: Default::default(),
             }),
         };
 
@@ -557,6 +641,7 @@ mod tests {
                 tests_total: 5,
                 advisories_count: 0,
                 clippy_warnings: 0,
+                submodules: Default::default(),
             }),
         };
 
@@ -567,6 +652,36 @@ mod tests {
 
     #[test]
     fn test_render_card_svg_with_metrics() {
+        let mut submodules = std::collections::BTreeMap::new();
+        submodules.insert(
+            "k3-core".to_string(),
+            crate::job::SubmoduleMetrics {
+                name: "k3-core".to_string(),
+                path: "code/core".to_string(),
+                quality_score: 100,
+                letter_grade: "A+".to_string(),
+                tests_passed: 4,
+                tests_total: 4,
+                coverage_pct: Some(87.9),
+                benchmark_summary: Some("1 benches (49.0 ns/iter)".to_string()),
+                clippy_warnings: 0,
+            },
+        );
+        submodules.insert(
+            "k3-engine".to_string(),
+            crate::job::SubmoduleMetrics {
+                name: "k3-engine".to_string(),
+                path: "code/engine".to_string(),
+                quality_score: 100,
+                letter_grade: "A+".to_string(),
+                tests_passed: 1,
+                tests_total: 1,
+                coverage_pct: Some(100.0),
+                benchmark_summary: None,
+                clippy_warnings: 0,
+            },
+        );
+
         let record = JobRecord {
             job: sample_job("refs/heads/main"),
             status: JobStatus::Completed {
@@ -584,6 +699,7 @@ mod tests {
                 tests_total: 5,
                 advisories_count: 0,
                 clippy_warnings: 0,
+                submodules,
             }),
         };
 
@@ -595,5 +711,8 @@ mod tests {
         assert!(svg.contains("89.5%"));
         assert!(svg.contains("CARGO BENCH"));
         assert!(svg.contains("0 Advisories"));
+        assert!(svg.contains("SUBMODULES"));
+        assert!(svg.contains("k3-core"));
+        assert!(svg.contains("k3-engine"));
     }
 }
