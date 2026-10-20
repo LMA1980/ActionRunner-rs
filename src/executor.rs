@@ -417,7 +417,9 @@ impl Executor {
             );
 
             let mut clone_cmd = Command::new("git");
-            let git_url = if Path::new("/home/lma1980/.ssh/id_k3_ci").exists() {
+            let git_url = if Path::new("/home/lma1980/.ssh/id_k3_ci").exists()
+                && (job.clone_url.contains("github.com") || job.clone_url.starts_with("git@"))
+            {
                 format!("git@github.com:{}.git", job.repo_name)
             } else {
                 job.clone_url.clone()
@@ -670,20 +672,37 @@ impl Executor {
                     let line = line.trim();
                     if line.starts_with("[submodule ") {
                         if !curr_path.is_empty() {
-                            let folder_name = curr_path.rsplit_once('/').map(|(_, f)| f).unwrap_or(&curr_path).to_string();
+                            let folder_name = curr_path
+                                .rsplit_once('/')
+                                .map(|(_, f)| f)
+                                .unwrap_or(&curr_path)
+                                .to_string();
                             let name = if !curr_url.is_empty() {
-                                curr_url.trim_end_matches(".git").rsplit_once(&['/', ':'][..]).map(|(_, n)| n).unwrap_or(&folder_name).to_string()
+                                curr_url
+                                    .trim_end_matches(".git")
+                                    .rsplit_once(&['/', ':'][..])
+                                    .map(|(_, n)| n)
+                                    .unwrap_or(&folder_name)
+                                    .to_string()
                             } else if !curr_name.is_empty() {
                                 curr_name.clone()
                             } else {
                                 folder_name.clone()
                             };
                             let crate_name = name.replace('-', "_");
-                            submodules_info.push((name, curr_path.clone(), crate_name, folder_name));
+                            submodules_info.push((
+                                name,
+                                curr_path.clone(),
+                                crate_name,
+                                folder_name,
+                            ));
                         }
                         curr_path.clear();
                         curr_url.clear();
-                        if let Some(n) = line.strip_prefix("[submodule \"").and_then(|s| s.strip_suffix("\"]")) {
+                        if let Some(n) = line
+                            .strip_prefix("[submodule \"")
+                            .and_then(|s| s.strip_suffix("\"]"))
+                        {
                             curr_name = n.rsplit_once('/').map(|(_, f)| f).unwrap_or(n).to_string();
                         } else {
                             curr_name.clear();
@@ -699,9 +718,18 @@ impl Executor {
                     }
                 }
                 if !curr_path.is_empty() {
-                    let folder_name = curr_path.rsplit_once('/').map(|(_, f)| f).unwrap_or(&curr_path).to_string();
+                    let folder_name = curr_path
+                        .rsplit_once('/')
+                        .map(|(_, f)| f)
+                        .unwrap_or(&curr_path)
+                        .to_string();
                     let name = if !curr_url.is_empty() {
-                        curr_url.trim_end_matches(".git").rsplit_once(&['/', ':'][..]).map(|(_, n)| n).unwrap_or(&folder_name).to_string()
+                        curr_url
+                            .trim_end_matches(".git")
+                            .rsplit_once(&['/', ':'][..])
+                            .map(|(_, n)| n)
+                            .unwrap_or(&folder_name)
+                            .to_string()
                     } else if !curr_name.is_empty() {
                         curr_name
                     } else {
@@ -725,19 +753,29 @@ impl Executor {
         let mut advisories_count = 0;
         let mut clippy_warnings = 0;
 
-        let mut sub_tests_passed: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        let mut sub_tests_total: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        let mut sub_bench_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        let mut sub_bench_time: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut sub_cov_lines_exec: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        let mut sub_cov_lines_total: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        let mut sub_clippy_warnings: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut sub_tests_passed: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let mut sub_tests_total: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let mut sub_bench_count: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let mut sub_bench_time: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut sub_cov_lines_exec: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let mut sub_cov_lines_total: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let mut sub_clippy_warnings: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
 
         let mut current_target_sub: Option<String> = None;
 
         for line in log_content.lines() {
             // Track active submodule test/bench suite
-            if line.contains("Running unittests") || line.contains("Running benches/") || line.contains("Running tests/") {
+            if line.contains("Running unittests")
+                || line.contains("Running benches/")
+                || line.contains("Running tests/")
+            {
                 let mut matched_sub = None;
                 for (name, path, crate_name, folder_name) in &submodules_info {
                     if line.contains(&format!("deps/{}-", crate_name))
@@ -835,8 +873,13 @@ impl Executor {
                     for (name, path, _crate_name, folder_name) in &submodules_info {
                         let p1 = format!("{}/", folder_name);
                         let p2 = format!("{}/", path);
-                        if filename.starts_with(&p1) || filename.starts_with(&p2) || filename.contains(&format!("/{}/", folder_name)) {
-                            if let (Ok(tot), Ok(missed)) = (tokens[7].parse::<u32>(), tokens[8].parse::<u32>()) {
+                        if filename.starts_with(&p1)
+                            || filename.starts_with(&p2)
+                            || filename.contains(&format!("/{}/", folder_name))
+                        {
+                            if let (Ok(tot), Ok(missed)) =
+                                (tokens[7].parse::<u32>(), tokens[8].parse::<u32>())
+                            {
                                 let exec = tot.saturating_sub(missed);
                                 *sub_cov_lines_total.entry(name.clone()).or_insert(0) += tot;
                                 *sub_cov_lines_exec.entry(name.clone()).or_insert(0) += exec;
@@ -920,7 +963,9 @@ impl Executor {
             let p = *sub_tests_passed.get(name).unwrap_or(&0);
             let tot = *sub_tests_total.get(name).unwrap_or(&0);
             let clip = *sub_clippy_warnings.get(name).unwrap_or(&0);
-            let cov = if let (Some(&exec), Some(&total)) = (sub_cov_lines_exec.get(name), sub_cov_lines_total.get(name)) {
+            let cov = if let (Some(&exec), Some(&total)) =
+                (sub_cov_lines_exec.get(name), sub_cov_lines_total.get(name))
+            {
                 if total > 0 {
                     Some(((exec as f64 / total as f64) * 1000.0).round() / 10.0)
                 } else {
@@ -1079,7 +1124,9 @@ mod tests {
             .current_dir(&work_dir)
             .output()
             .unwrap();
-        let c1 = String::from_utf8_lossy(&c1_output.stdout).trim().to_string();
+        let c1 = String::from_utf8_lossy(&c1_output.stdout)
+            .trim()
+            .to_string();
 
         std::fs::write(work_dir.join("file.txt"), "second commit\n").unwrap();
         assert!(StdCommand::new("git")
@@ -1105,7 +1152,9 @@ mod tests {
             .current_dir(&work_dir)
             .output()
             .unwrap();
-        let c2 = String::from_utf8_lossy(&c2_output.stdout).trim().to_string();
+        let c2 = String::from_utf8_lossy(&c2_output.stdout)
+            .trim()
+            .to_string();
 
         // 3. Instantiate Executor
         let config = Config {
@@ -1204,7 +1253,9 @@ mod tests {
             .current_dir(&repo_dir)
             .output()
             .unwrap();
-        assert!(String::from_utf8_lossy(&status_out.stdout).trim().is_empty());
+        assert!(String::from_utf8_lossy(&status_out.stdout)
+            .trim()
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -1285,7 +1336,9 @@ mod tests {
             .current_dir(&work_dir)
             .output()
             .unwrap();
-        let c1 = String::from_utf8_lossy(&c1_output.stdout).trim().to_string();
+        let c1 = String::from_utf8_lossy(&c1_output.stdout)
+            .trim()
+            .to_string();
 
         let config = Config {
             bind_addr: "127.0.0.1:0".to_string(),
@@ -1382,7 +1435,9 @@ TOTAL                             30                 2    93.33%           7    
         let job_store = JobStore::new(10, None);
         let executor = Executor::new(config, job_store);
 
-        let metrics = executor.extract_or_compute_metrics(&temp_dir, &log_path, true).await;
+        let metrics = executor
+            .extract_or_compute_metrics(&temp_dir, &log_path, true)
+            .await;
 
         assert_eq!(metrics.tests_passed, 5);
         assert_eq!(metrics.tests_total, 5);
@@ -1391,15 +1446,25 @@ TOTAL                             30                 2    93.33%           7    
 
         assert_eq!(metrics.submodules.len(), 2);
 
-        let core = metrics.submodules.get("k3-core").expect("k3-core submodule missing");
+        let core = metrics
+            .submodules
+            .get("k3-core")
+            .expect("k3-core submodule missing");
         assert_eq!(core.tests_passed, 4);
         assert_eq!(core.tests_total, 4);
         assert_eq!(core.quality_score, 100);
         assert_eq!(core.letter_grade, "A+");
         assert_eq!(core.coverage_pct, Some(90.0));
-        assert!(core.benchmark_summary.as_ref().unwrap().contains("49.0 ns/iter"));
+        assert!(core
+            .benchmark_summary
+            .as_ref()
+            .unwrap()
+            .contains("49.0 ns/iter"));
 
-        let engine = metrics.submodules.get("k3-engine").expect("k3-engine submodule missing");
+        let engine = metrics
+            .submodules
+            .get("k3-engine")
+            .expect("k3-engine submodule missing");
         assert_eq!(engine.tests_passed, 1);
         assert_eq!(engine.tests_total, 1);
         assert_eq!(engine.quality_score, 100);

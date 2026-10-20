@@ -208,13 +208,22 @@ impl JobStore {
         for record in store.iter() {
             if let Some(ref metrics) = record.metrics {
                 for (sub_name, sub) in &metrics.submodules {
-                    let sub_short = sub_name.rsplit_once('/').map(|(_, r)| r).unwrap_or(sub_name);
-                    let path_short = sub.path.rsplit_once('/').map(|(_, r)| r).unwrap_or(&sub.path);
+                    let sub_short = sub_name
+                        .rsplit_once('/')
+                        .map(|(_, r)| r)
+                        .unwrap_or(sub_name);
+                    let path_short = sub
+                        .path
+                        .rsplit_once('/')
+                        .map(|(_, r)| r)
+                        .unwrap_or(&sub.path);
 
                     let is_match = sub_name.eq_ignore_ascii_case(repo)
                         || sub_short.eq_ignore_ascii_case(clean_target)
                         || path_short.eq_ignore_ascii_case(clean_target)
-                        || sub_name.replace('-', "_").eq_ignore_ascii_case(&clean_target.replace('-', "_"));
+                        || sub_name
+                            .replace('-', "_")
+                            .eq_ignore_ascii_case(&clean_target.replace('-', "_"));
 
                     if is_match {
                         let owner = repo.split_once('/').map(|(o, _)| o).unwrap_or("LMA1980");
@@ -261,19 +270,34 @@ impl JobStore {
     ) -> Option<JobRecord> {
         let parent_record = self.find_latest_job(parent_repo, branch).await?;
         let metrics = parent_record.metrics.as_ref()?;
-        let clean_target = submodule.rsplit_once('/').map(|(_, r)| r).unwrap_or(submodule);
+        let clean_target = submodule
+            .rsplit_once('/')
+            .map(|(_, r)| r)
+            .unwrap_or(submodule);
 
         for (sub_name, sub) in &metrics.submodules {
-            let sub_short = sub_name.rsplit_once('/').map(|(_, r)| r).unwrap_or(sub_name);
-            let path_short = sub.path.rsplit_once('/').map(|(_, r)| r).unwrap_or(&sub.path);
+            let sub_short = sub_name
+                .rsplit_once('/')
+                .map(|(_, r)| r)
+                .unwrap_or(sub_name);
+            let path_short = sub
+                .path
+                .rsplit_once('/')
+                .map(|(_, r)| r)
+                .unwrap_or(&sub.path);
 
             let is_match = sub_name.eq_ignore_ascii_case(submodule)
                 || sub_short.eq_ignore_ascii_case(clean_target)
                 || path_short.eq_ignore_ascii_case(clean_target)
-                || sub_name.replace('-', "_").eq_ignore_ascii_case(&clean_target.replace('-', "_"));
+                || sub_name
+                    .replace('-', "_")
+                    .eq_ignore_ascii_case(&clean_target.replace('-', "_"));
 
             if is_match {
-                let owner = parent_repo.split_once('/').map(|(o, _)| o).unwrap_or("LMA1980");
+                let owner = parent_repo
+                    .split_once('/')
+                    .map(|(o, _)| o)
+                    .unwrap_or("LMA1980");
                 let sub_job = Job {
                     id: format!("{}-{}", parent_record.job.id, sub_short),
                     event_type: parent_record.job.event_type.clone(),
@@ -345,22 +369,34 @@ mod tests {
             },
         );
 
-        store.add_job(job.clone(), PathBuf::from("logs/test.log")).await;
-        store.update_metrics(&job.id, JobMetrics {
-            quality_score: 98,
-            letter_grade: "A+".to_string(),
-            coverage_pct: Some(90.0),
-            benchmark_summary: None,
-            tests_passed: 10,
-            tests_total: 10,
-            advisories_count: 0,
-            clippy_warnings: 0,
-            submodules,
-        }).await;
-        store.update_status(&job.id, JobStatus::Completed {
-            duration_secs: 5,
-            exit_code: 0,
-        }).await;
+        store
+            .add_job(job.clone(), PathBuf::from("logs/test.log"))
+            .await;
+        store
+            .update_metrics(
+                &job.id,
+                JobMetrics {
+                    quality_score: 98,
+                    letter_grade: "A+".to_string(),
+                    coverage_pct: Some(90.0),
+                    benchmark_summary: None,
+                    tests_passed: 10,
+                    tests_total: 10,
+                    advisories_count: 0,
+                    clippy_warnings: 0,
+                    submodules,
+                },
+            )
+            .await;
+        store
+            .update_status(
+                &job.id,
+                JobStatus::Completed {
+                    duration_secs: 5,
+                    exit_code: 0,
+                },
+            )
+            .await;
 
         // Test direct parent lookup
         let parent = store.find_latest_job("LMA1980/model-runner", None).await;
@@ -397,4 +433,3 @@ mod tests {
         assert_eq!(path_sub.unwrap().metrics.unwrap().quality_score, 95);
     }
 }
-

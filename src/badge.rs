@@ -348,7 +348,9 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
 
     let status_uppercase = info.status_text.to_uppercase();
 
-    let has_submodules = metrics_opt.map(|m| !m.submodules.is_empty()).unwrap_or(false);
+    let has_submodules = metrics_opt
+        .map(|m| !m.submodules.is_empty())
+        .unwrap_or(false);
     let card_height = if has_submodules { 220 } else { 185 };
 
     let submodules_svg = if let Some(m) = metrics_opt {
@@ -365,7 +367,10 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
                     70..=79 => "#dbab09",
                     _ => "#cb2431",
                 };
-                let display_name = sub_name.rsplit_once('/').map(|(_, n)| n).unwrap_or(sub_name);
+                let display_name = sub_name
+                    .rsplit_once('/')
+                    .map(|(_, n)| n)
+                    .unwrap_or(sub_name);
                 let score_str = format!("{}% {}", sub.quality_score, sub.letter_grade);
                 let pill_w = 125;
                 items_svg.push_str(&format!(
