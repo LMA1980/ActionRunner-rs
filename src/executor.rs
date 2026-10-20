@@ -443,6 +443,7 @@ impl Executor {
             let mut fetch_cmd = Command::new("git");
             fetch_cmd
                 .arg("fetch")
+                .arg("--prune")
                 .arg("--tags")
                 .arg("origin")
                 .arg("+refs/heads/*:refs/remotes/origin/*")
@@ -461,36 +462,142 @@ impl Executor {
             }
         }
 
+        if job.ref_name.starts_with("refs/heads/") {
+            let branch = job.ref_name.trim_start_matches("refs/heads/");
+            let _ = writeln!(
+                log,
+                "[ActionRunner-rs] Checking out and updating branch '{}' at commit {}",
+                branch, job.commit_sha
+            );
+            let mut checkout_cmd = Command::new("git");
+            checkout_cmd
+                .arg("checkout")
+                .arg("-f")
+                .arg("-B")
+                .arg(branch)
+                .arg(&job.commit_sha);
+            checkout_cmd.current_dir(repo_dir);
+
+            checkout_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+            checkout_cmd.stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+
+            let status = checkout_cmd
+                .status()
+                .await
+                .map_err(|e| format!("git checkout spawn error: {}", e))?;
+            if !status.success() {
+                return Err(format!(
+                    "git checkout -B {} failed with code: {:?}",
+                    branch,
+                    status.code()
+                ));
+            }
+
+            // Set up upstream tracking so local branch tracks origin/<branch>
+            let mut track_cmd = Command::new("git");
+            track_cmd
+                .arg("branch")
+                .arg(format!("--set-upstream-to=origin/{}", branch))
+                .arg(branch);
+            track_cmd.current_dir(repo_dir);
+            track_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+            track_cmd.stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+            let _ = track_cmd.status().await;
+        } else {
+            let _ = writeln!(
+                log,
+                "[ActionRunner-rs] Checking out ref {} at commit {}",
+                job.ref_name, job.commit_sha
+            );
+            let mut checkout_cmd = Command::new("git");
+            checkout_cmd.arg("checkout").arg("-f").arg(&job.commit_sha);
+            checkout_cmd.current_dir(repo_dir);
+
+            checkout_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+            checkout_cmd.stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+
+            let status = checkout_cmd
+                .status()
+                .await
+                .map_err(|e| format!("git checkout spawn error: {}", e))?;
+            if !status.success() {
+                return Err(format!(
+                    "git checkout failed with code: {:?}",
+                    status.code()
+                ));
+            }
+        }
+
+        // Hard reset working tree to target commit to wipe any tracked modifications
         let _ = writeln!(
             log,
-            "[ActionRunner-rs] Checking out commit {}",
+            "[ActionRunner-rs] Resetting working tree to {}",
             job.commit_sha
         );
-        let mut checkout_cmd = Command::new("git");
-        checkout_cmd.arg("checkout").arg("-f").arg(&job.commit_sha);
-        checkout_cmd.current_dir(repo_dir);
-
-        checkout_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
-        checkout_cmd.stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
-
-        let status = checkout_cmd
+        let mut reset_cmd = Command::new("git");
+        reset_cmd.arg("reset").arg("--hard").arg(&job.commit_sha);
+        reset_cmd.current_dir(repo_dir);
+        reset_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+        reset_cmd.stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+        let reset_status = reset_cmd
             .status()
             .await
-            .map_err(|e| format!("git checkout spawn error: {}", e))?;
-        if !status.success() {
+            .map_err(|e| format!("git reset spawn error: {}", e))?;
+        if !reset_status.success() {
             return Err(format!(
-                "git checkout failed with code: {:?}",
-                status.code()
+                "git reset --hard failed with code: {:?}",
+                reset_status.code()
             ));
         }
 
+        // Clean any untracked leftover files from previous workflow executions
+        let _ = writeln!(
+            log,
+            "[ActionRunner-rs] Cleaning untracked files and directories"
+        );
+        let mut clean_cmd = Command::new("git");
+        clean_cmd.arg("clean").arg("-fd");
+        clean_cmd.current_dir(repo_dir);
+        clean_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+        clean_cmd.stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+        let clean_status = clean_cmd
+            .status()
+            .await
+            .map_err(|e| format!("git clean -fd spawn error: {}", e))?;
+        if !clean_status.success() {
+            return Err(format!(
+                "git clean -fd failed with code: {:?}",
+                clean_status.code()
+            ));
+        }
+
+        // Submodule sync (synchronizes .gitmodules remote URLs into .git/config)
+        let _ = writeln!(log, "[ActionRunner-rs] Synchronizing submodules");
+        let mut sync_cmd = Command::new("git");
+        sync_cmd.arg("submodule").arg("sync").arg("--recursive");
+        sync_cmd.current_dir(repo_dir);
+        sync_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+        sync_cmd.stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+        let sync_status = sync_cmd
+            .status()
+            .await
+            .map_err(|e| format!("git submodule sync spawn error: {}", e))?;
+        if !sync_status.success() {
+            return Err(format!(
+                "git submodule sync failed with code: {:?}",
+                sync_status.code()
+            ));
+        }
+
+        // Submodule update recursively with --force
         let _ = writeln!(log, "[ActionRunner-rs] Updating submodules recursively");
         let mut submod_cmd = Command::new("git");
         submod_cmd
             .arg("submodule")
             .arg("update")
             .arg("--init")
-            .arg("--recursive");
+            .arg("--recursive")
+            .arg("--force");
         submod_cmd.current_dir(repo_dir);
         submod_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
         submod_cmd.stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
@@ -503,6 +610,33 @@ impl Executor {
                 "git submodule update failed with code: {:?}",
                 submod_status.code()
             ));
+        }
+
+        // Ensure submodules are reset and untracked files in submodules are cleaned
+        let mut submod_clean = Command::new("git");
+        submod_clean
+            .arg("submodule")
+            .arg("foreach")
+            .arg("--recursive")
+            .arg("git reset --hard && git clean -fd");
+        submod_clean.current_dir(repo_dir);
+        submod_clean.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+        submod_clean.stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+        let _ = submod_clean.status().await;
+
+        if job.ref_name.starts_with("refs/heads/") {
+            let branch = job.ref_name.trim_start_matches("refs/heads/");
+            let _ = writeln!(
+                log,
+                "[ActionRunner-rs] Local repository is up to date on branch '{}' at commit {}\n",
+                branch, job.commit_sha
+            );
+        } else {
+            let _ = writeln!(
+                log,
+                "[ActionRunner-rs] Local repository is up to date at commit {}\n",
+                job.commit_sha
+            );
         }
 
         Ok(())
@@ -652,5 +786,337 @@ impl Executor {
             advisories_count,
             clippy_warnings,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::process::Command as StdCommand;
+
+    #[tokio::test]
+    async fn test_sync_git_repo_branch_push() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "actionrunner-test-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let origin_dir = temp_dir.join("origin.git");
+        let work_dir = temp_dir.join("work");
+        let runner_workspace = temp_dir.join("workspace");
+        let repo_dir = runner_workspace.join("repos/LMA1980/test-repo");
+        let log_path = temp_dir.join("test.log");
+
+        let _ = std::fs::create_dir_all(&repo_dir);
+
+        // 1. Initialize bare origin repo
+        assert!(StdCommand::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg("-b")
+            .arg("main")
+            .arg(&origin_dir)
+            .status()
+            .unwrap()
+            .success());
+
+        // 2. Clone to temporary work directory and create two commits
+        assert!(StdCommand::new("git")
+            .arg("clone")
+            .arg(&origin_dir)
+            .arg(&work_dir)
+            .status()
+            .unwrap()
+            .success());
+
+        // Configure dummy user for commits
+        let _ = StdCommand::new("git")
+            .arg("config")
+            .arg("user.name")
+            .arg("CI")
+            .current_dir(&work_dir)
+            .status();
+        let _ = StdCommand::new("git")
+            .arg("config")
+            .arg("user.email")
+            .arg("ci@test.com")
+            .current_dir(&work_dir)
+            .status();
+
+        std::fs::write(work_dir.join("file.txt"), "first commit\n").unwrap();
+        assert!(StdCommand::new("git")
+            .arg("add")
+            .arg("file.txt")
+            .current_dir(&work_dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(StdCommand::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("first")
+            .current_dir(&work_dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(StdCommand::new("git")
+            .arg("push")
+            .arg("origin")
+            .arg("main")
+            .current_dir(&work_dir)
+            .status()
+            .unwrap()
+            .success());
+
+        let c1_output = StdCommand::new("git")
+            .arg("rev-parse")
+            .arg("HEAD")
+            .current_dir(&work_dir)
+            .output()
+            .unwrap();
+        let c1 = String::from_utf8_lossy(&c1_output.stdout).trim().to_string();
+
+        std::fs::write(work_dir.join("file.txt"), "second commit\n").unwrap();
+        assert!(StdCommand::new("git")
+            .arg("commit")
+            .arg("-am")
+            .arg("second")
+            .current_dir(&work_dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(StdCommand::new("git")
+            .arg("push")
+            .arg("origin")
+            .arg("main")
+            .current_dir(&work_dir)
+            .status()
+            .unwrap()
+            .success());
+
+        let c2_output = StdCommand::new("git")
+            .arg("rev-parse")
+            .arg("HEAD")
+            .current_dir(&work_dir)
+            .output()
+            .unwrap();
+        let c2 = String::from_utf8_lossy(&c2_output.stdout).trim().to_string();
+
+        // 3. Instantiate Executor
+        let config = Config {
+            bind_addr: "127.0.0.1:0".to_string(),
+            webhook_secret: None,
+            workspace_dir: runner_workspace.clone(),
+            allowed_repositories: vec!["LMA1980/*".to_string()],
+            job_timeout_seconds: 60,
+        };
+        let job_store = JobStore::new(10, None);
+        let executor = Executor::new(config, job_store);
+
+        let mut log = File::create(&log_path).unwrap();
+
+        // 4. Test initial clone and checkout on push to main (commit C1)
+        let job1 = Job {
+            id: "job-1".to_string(),
+            event_type: "push".to_string(),
+            repo_name: "LMA1980/test-repo".to_string(),
+            clone_url: origin_dir.to_str().unwrap().to_string(),
+            commit_sha: c1.clone(),
+            ref_name: "refs/heads/main".to_string(),
+            sender: "test".to_string(),
+            queued_at: Utc::now(),
+        };
+
+        let res1 = executor.sync_git_repo(&job1, &repo_dir, &mut log).await;
+        assert!(res1.is_ok(), "sync_git_repo job1 failed: {:?}", res1);
+
+        // Verify HEAD is attached to main, not detached!
+        let branch_out1 = StdCommand::new("git")
+            .arg("symbolic-ref")
+            .arg("--short")
+            .arg("HEAD")
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&branch_out1.stdout).trim(), "main");
+
+        let rev_out1 = StdCommand::new("git")
+            .arg("rev-parse")
+            .arg("HEAD")
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&rev_out1.stdout).trim(), c1);
+
+        // 5. Simulate dirty files left over in repo_dir
+        std::fs::write(repo_dir.join("dirty.txt"), "leftover garbage\n").unwrap();
+        std::fs::write(repo_dir.join("file.txt"), "tampered content\n").unwrap();
+
+        // 6. Test push event to main at commit C2
+        let job2 = Job {
+            id: "job-2".to_string(),
+            event_type: "push".to_string(),
+            repo_name: "LMA1980/test-repo".to_string(),
+            clone_url: origin_dir.to_str().unwrap().to_string(),
+            commit_sha: c2.clone(),
+            ref_name: "refs/heads/main".to_string(),
+            sender: "test".to_string(),
+            queued_at: Utc::now(),
+        };
+
+        let res2 = executor.sync_git_repo(&job2, &repo_dir, &mut log).await;
+        assert!(res2.is_ok(), "sync_git_repo job2 failed: {:?}", res2);
+
+        // Verify HEAD is still on main (not detached!)
+        let branch_out2 = StdCommand::new("git")
+            .arg("symbolic-ref")
+            .arg("--short")
+            .arg("HEAD")
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&branch_out2.stdout).trim(), "main");
+
+        // Verify commit SHA is C2
+        let rev_out2 = StdCommand::new("git")
+            .arg("rev-parse")
+            .arg("HEAD")
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&rev_out2.stdout).trim(), c2);
+
+        // Verify dirty file was cleaned
+        assert!(
+            !repo_dir.join("dirty.txt").exists(),
+            "dirty.txt was not cleaned!"
+        );
+
+        // Verify working tree is clean
+        let status_out = StdCommand::new("git")
+            .arg("status")
+            .arg("--porcelain")
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&status_out.stdout).trim().is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_sync_git_repo_detached_ref() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "actionrunner-test-pr-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let origin_dir = temp_dir.join("origin.git");
+        let work_dir = temp_dir.join("work");
+        let runner_workspace = temp_dir.join("workspace");
+        let repo_dir = runner_workspace.join("repos/LMA1980/test-pr-repo");
+        let log_path = temp_dir.join("test.log");
+
+        let _ = std::fs::create_dir_all(&repo_dir);
+
+        assert!(StdCommand::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg("-b")
+            .arg("main")
+            .arg(&origin_dir)
+            .status()
+            .unwrap()
+            .success());
+
+        assert!(StdCommand::new("git")
+            .arg("clone")
+            .arg(&origin_dir)
+            .arg(&work_dir)
+            .status()
+            .unwrap()
+            .success());
+
+        let _ = StdCommand::new("git")
+            .arg("config")
+            .arg("user.name")
+            .arg("CI")
+            .current_dir(&work_dir)
+            .status();
+        let _ = StdCommand::new("git")
+            .arg("config")
+            .arg("user.email")
+            .arg("ci@test.com")
+            .current_dir(&work_dir)
+            .status();
+
+        std::fs::write(work_dir.join("file.txt"), "pr commit\n").unwrap();
+        assert!(StdCommand::new("git")
+            .arg("add")
+            .arg("file.txt")
+            .current_dir(&work_dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(StdCommand::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("pr commit")
+            .current_dir(&work_dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(StdCommand::new("git")
+            .arg("push")
+            .arg("origin")
+            .arg("main")
+            .current_dir(&work_dir)
+            .status()
+            .unwrap()
+            .success());
+
+        let c1_output = StdCommand::new("git")
+            .arg("rev-parse")
+            .arg("HEAD")
+            .current_dir(&work_dir)
+            .output()
+            .unwrap();
+        let c1 = String::from_utf8_lossy(&c1_output.stdout).trim().to_string();
+
+        let config = Config {
+            bind_addr: "127.0.0.1:0".to_string(),
+            webhook_secret: None,
+            workspace_dir: runner_workspace.clone(),
+            allowed_repositories: vec!["LMA1980/*".to_string()],
+            job_timeout_seconds: 60,
+        };
+        let job_store = JobStore::new(10, None);
+        let executor = Executor::new(config, job_store);
+
+        let mut log = File::create(&log_path).unwrap();
+
+        // Non-branch ref (e.g., PR or tag)
+        let job = Job {
+            id: "job-pr-1".to_string(),
+            event_type: "pull_request".to_string(),
+            repo_name: "LMA1980/test-pr-repo".to_string(),
+            clone_url: origin_dir.to_str().unwrap().to_string(),
+            commit_sha: c1.clone(),
+            ref_name: "refs/pull/42/head".to_string(),
+            sender: "pr-user".to_string(),
+            queued_at: Utc::now(),
+        };
+
+        let res = executor.sync_git_repo(&job, &repo_dir, &mut log).await;
+        assert!(res.is_ok(), "sync_git_repo for PR failed: {:?}", res);
+
+        let rev_out = StdCommand::new("git")
+            .arg("rev-parse")
+            .arg("HEAD")
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&rev_out.stdout).trim(), c1);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
