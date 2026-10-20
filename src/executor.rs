@@ -474,6 +474,27 @@ impl Executor {
             ));
         }
 
+        let _ = writeln!(log, "[ActionRunner-rs] Updating submodules recursively");
+        let mut submod_cmd = Command::new("git");
+        submod_cmd
+            .arg("submodule")
+            .arg("update")
+            .arg("--init")
+            .arg("--recursive");
+        submod_cmd.current_dir(repo_dir);
+        submod_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+        submod_cmd.stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
+        let submod_status = submod_cmd
+            .status()
+            .await
+            .map_err(|e| format!("git submodule spawn error: {}", e))?;
+        if !submod_status.success() {
+            return Err(format!(
+                "git submodule update failed with code: {:?}",
+                submod_status.code()
+            ));
+        }
+
         Ok(())
     }
 }
