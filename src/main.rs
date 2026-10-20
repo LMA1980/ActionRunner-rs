@@ -1,3 +1,4 @@
+mod badge;
 mod config;
 mod executor;
 mod job;
@@ -6,8 +7,8 @@ mod workflow;
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
-    response::Json,
+    http::{header, StatusCode},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -43,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("GitHub Webhook HMAC signature verification: DISABLED (set GITHUB_WEBHOOK_SECRET to enable)");
     }
 
-    let job_store = JobStore::new(100);
+    let job_store = JobStore::new(100, Some(&config.workspace_dir));
     let (tx, rx) = mpsc::channel(32);
 
     let executor = Arc::new(Executor::new(config.clone(), job_store.clone()));
@@ -61,6 +62,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/jobs", get(list_jobs))
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/log", get(get_job_log))
+        // Dynamic Status Badges & Cards
+        .route("/badges/{owner}/{repo}/status.svg", get(get_repo_badge))
+        .route(
+            "/badges/{owner}/{repo}/{branch}/status.svg",
+            get(get_branch_badge),
+        )
+        .route("/badges/{owner}/{repo}/shield.json", get(get_repo_shield))
+        .route(
+            "/badges/{owner}/{repo}/{branch}/shield.json",
+            get(get_branch_shield),
+        )
+        .route("/cards/{owner}/{repo}/card.svg", get(get_repo_card))
+        .route(
+            "/cards/{owner}/{repo}/{branch}/card.svg",
+            get(get_branch_card),
+        )
         .route("/", get(health_check))
         .with_state(state);
 
@@ -106,10 +123,132 @@ async fn get_job_log(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
 ) -> Result<String, (StatusCode, &'static str)> {
-    let record = state.job_store.get_job(&job_id).await
+    let record = state
+        .job_store
+        .get_job(&job_id)
+        .await
         .ok_or((StatusCode::NOT_FOUND, "Job not found"))?;
 
     let full_path = state.config.workspace_dir.join(&record.log_file);
-    tokio::fs::read_to_string(&full_path).await
-        .map_err(|_| (StatusCode::NOT_FOUND, "Log file not found or not yet generated"))
+    tokio::fs::read_to_string(&full_path).await.map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            "Log file not found or not yet generated",
+        )
+    })
+}
+
+async fn get_repo_badge(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Response {
+    let repo_full = format!("{}/{}", owner, repo);
+    let record = state.job_store.find_latest_job(&repo_full, None).await;
+    let svg = badge::render_status_badge("k3-ci", record.as_ref());
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+        ],
+        svg,
+    )
+        .into_response()
+}
+
+async fn get_branch_badge(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, branch)): Path<(String, String, String)>,
+) -> Response {
+    let repo_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_latest_job(&repo_full, Some(&branch))
+        .await;
+    let svg = badge::render_status_badge("k3-ci", record.as_ref());
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+        ],
+        svg,
+    )
+        .into_response()
+}
+
+async fn get_repo_shield(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Response {
+    let repo_full = format!("{}/{}", owner, repo);
+    let record = state.job_store.find_latest_job(&repo_full, None).await;
+    let val = badge::render_shield_json("k3-ci", record.as_ref());
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+        ],
+        Json(val),
+    )
+        .into_response()
+}
+
+async fn get_branch_shield(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, branch)): Path<(String, String, String)>,
+) -> Response {
+    let repo_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_latest_job(&repo_full, Some(&branch))
+        .await;
+    let val = badge::render_shield_json("k3-ci", record.as_ref());
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+        ],
+        Json(val),
+    )
+        .into_response()
+}
+
+async fn get_repo_card(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Response {
+    let repo_full = format!("{}/{}", owner, repo);
+    let record = state.job_store.find_latest_job(&repo_full, None).await;
+    let branch = record
+        .as_ref()
+        .map(|r| r.job.ref_name.trim_start_matches("refs/heads/").to_string())
+        .unwrap_or_else(|| "main".to_string());
+    let svg = badge::render_card_svg(&repo_full, &branch, record.as_ref());
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+        ],
+        svg,
+    )
+        .into_response()
+}
+
+async fn get_branch_card(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, branch)): Path<(String, String, String)>,
+) -> Response {
+    let repo_full = format!("{}/{}", owner, repo);
+    let record = state
+        .job_store
+        .find_latest_job(&repo_full, Some(&branch))
+        .await;
+    let svg = badge::render_card_svg(&repo_full, &branch, record.as_ref());
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+        ],
+        svg,
+    )
+        .into_response()
 }

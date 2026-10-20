@@ -13,12 +13,15 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Self {
-        let bind_addr = env::var("ACTION_RUNNER_BIND").unwrap_or_else(|_| "127.0.0.1:8000".to_string());
+        let bind_addr =
+            env::var("ACTION_RUNNER_BIND").unwrap_or_else(|_| "127.0.0.1:8000".to_string());
 
         let webhook_secret = env::var("GITHUB_WEBHOOK_SECRET").ok().or_else(|| {
             let secret_path = Path::new("/home/lma1980/.github_webhook_secret");
             if secret_path.exists() {
-                fs::read_to_string(secret_path).ok().map(|s| s.trim().to_string())
+                fs::read_to_string(secret_path)
+                    .ok()
+                    .map(|s| s.trim().to_string())
             } else {
                 None
             }
@@ -29,7 +32,12 @@ impl Config {
             .unwrap_or_else(|_| PathBuf::from("/home/lma1980/repository/ci-workspace"));
 
         let allowed_repositories = env::var("ACTION_RUNNER_ALLOWED_REPOS")
-            .map(|val| val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .map(|val| {
+                val.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
             .unwrap_or_else(|_| vec!["LMA1980/*".to_string()]);
 
         let job_timeout_seconds = env::var("ACTION_RUNNER_TIMEOUT_SECS")

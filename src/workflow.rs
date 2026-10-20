@@ -20,7 +20,11 @@ pub struct StepConfig {
 }
 
 impl WorkflowConfig {
-    pub fn load_from_str(content: &str, repo_root: &Path, max_timeout: u64) -> Result<Self, String> {
+    pub fn load_from_str(
+        content: &str,
+        repo_root: &Path,
+        max_timeout: u64,
+    ) -> Result<Self, String> {
         let workflow: WorkflowConfig = serde_yaml::from_str(content)
             .map_err(|e| format!("Failed to parse YAML workflow: {}", e))?;
 
@@ -30,7 +34,11 @@ impl WorkflowConfig {
 
         for (idx, step) in workflow.steps.iter().enumerate() {
             if step.run.trim().is_empty() {
-                return Err(format!("Step #{} ('{}') has an empty 'run' command", idx + 1, step.name));
+                return Err(format!(
+                    "Step #{} ('{}') has an empty 'run' command",
+                    idx + 1,
+                    step.name
+                ));
             }
 
             if let Some(ref dir) = step.working_dir {

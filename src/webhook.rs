@@ -77,7 +77,10 @@ pub async fn handle_webhook(
                 ));
             }
             None => {
-                warn!("Missing X-Hub-Signature-256 header for delivery: {}", delivery);
+                warn!(
+                    "Missing X-Hub-Signature-256 header for delivery: {}",
+                    delivery
+                );
                 return Err((
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({
@@ -92,17 +95,16 @@ pub async fn handle_webhook(
     }
 
     // 2. Parse Payload JSON
-    let payload = serde_json::from_slice::<serde_json::Value>(&body)
-        .map_err(|e| {
-            warn!("Failed to parse webhook JSON payload: {}", e);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "Invalid JSON payload",
-                    "details": e.to_string()
-                })),
-            )
-        })?;
+    let payload = serde_json::from_slice::<serde_json::Value>(&body).map_err(|e| {
+        warn!("Failed to parse webhook JSON payload: {}", e);
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Invalid JSON payload",
+                "details": e.to_string()
+            })),
+        )
+    })?;
 
     let repo_name = payload
         .get("repository")
@@ -150,7 +152,7 @@ pub async fn handle_webhook(
         .unwrap_or("github")
         .to_string();
 
-    let (commit_sha, ref_name, clone_url, should_run) = if event == "push" {
+    let (commit_sha, ref_name, clone_url, event_type, should_run) = if event == "push" {
         let commit_sha = payload
             .get("after")
             .and_then(|s| s.as_str())
@@ -171,21 +173,63 @@ pub async fn handle_webhook(
 
         if commit_sha == "0000000000000000000000000000000000000000" {
             info!(ref_name = %ref_name, "Branch deletion push ignored");
-            ("".to_string(), "".to_string(), "".to_string(), false)
+            (
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+                "push".to_string(),
+                false,
+            )
         } else {
-            (commit_sha, ref_name, default_clone_url, true)
+            let evt = if ref_name.starts_with("refs/tags/") {
+                "tag".to_string()
+            } else {
+                "push".to_string()
+            };
+            (commit_sha, ref_name, default_clone_url, evt, true)
         }
     } else if event == "pull_request" {
-        let action = payload
-            .get("action")
-            .and_then(|a| a.as_str())
-            .unwrap_or("");
+        let action = payload.get("action").and_then(|a| a.as_str()).unwrap_or("");
 
-        if !matches!(action, "opened" | "synchronize" | "reopened") {
-            info!(action = %action, repo = %repo_name, "Pull request action does not trigger CI");
-            ("".to_string(), "".to_string(), "".to_string(), false)
-        } else {
-            let pr = payload.get("pull_request");
+        let pr = payload.get("pull_request");
+        let is_merged = pr
+            .and_then(|p| p.get("merged"))
+            .and_then(|m| m.as_bool())
+            .unwrap_or(false);
+
+        if action == "closed" && is_merged {
+            let merge_sha = pr
+                .and_then(|p| p.get("merge_commit_sha"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+
+            let head_sha = pr
+                .and_then(|p| p.get("head"))
+                .and_then(|h| h.get("sha"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+
+            let commit_sha = if !merge_sha.is_empty() {
+                merge_sha.to_string()
+            } else {
+                head_sha.to_string()
+            };
+
+            let base_ref = pr
+                .and_then(|p| p.get("base"))
+                .and_then(|b| b.get("ref"))
+                .and_then(|r| r.as_str())
+                .unwrap_or("main")
+                .to_string();
+
+            (
+                commit_sha,
+                format!("refs/heads/{}", base_ref),
+                default_clone_url,
+                "merge".to_string(),
+                true,
+            )
+        } else if matches!(action, "opened" | "synchronize" | "reopened") {
             let commit_sha = pr
                 .and_then(|p| p.get("head"))
                 .and_then(|h| h.get("sha"))
@@ -208,7 +252,22 @@ pub async fn handle_webhook(
                 .unwrap_or(&default_clone_url)
                 .to_string();
 
-            (commit_sha, ref_name, clone_url, true)
+            (
+                commit_sha,
+                ref_name,
+                clone_url,
+                "pull_request".to_string(),
+                true,
+            )
+        } else {
+            info!(action = %action, repo = %repo_name, "Pull request action does not trigger CI");
+            (
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+                "pull_request".to_string(),
+                false,
+            )
         }
     } else {
         // Generic event fallback
@@ -225,9 +284,15 @@ pub async fn handle_webhook(
             .to_string();
 
         if commit_sha.is_empty() {
-            (commit_sha, ref_name, default_clone_url, false)
+            (
+                commit_sha,
+                ref_name,
+                default_clone_url,
+                event.clone(),
+                false,
+            )
         } else {
-            (commit_sha, ref_name, default_clone_url, true)
+            (commit_sha, ref_name, default_clone_url, event.clone(), true)
         }
     };
 
@@ -248,7 +313,7 @@ pub async fn handle_webhook(
 
     let job = Job {
         id: job_id.clone(),
-        event_type: event.clone(),
+        event_type: event_type.clone(),
         repo_name: repo_name.clone(),
         clone_url,
         commit_sha: commit_sha.clone(),
@@ -274,14 +339,14 @@ pub async fn handle_webhook(
         ));
     }
 
-    info!(job_id = %job_id, event = %event, repo = %repo_name, commit = %commit_sha, "Job enqueued successfully");
+    info!(job_id = %job_id, event = %event_type, repo = %repo_name, commit = %commit_sha, "Job enqueued successfully");
 
     Ok((
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
             "status": "queued",
             "job_id": job_id,
-            "event": event,
+            "event": event_type,
             "repository": repo_name,
             "commit_sha": commit_sha,
             "ref": ref_name
