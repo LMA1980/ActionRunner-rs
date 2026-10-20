@@ -1,16 +1,24 @@
 mod config;
+mod executor;
+mod job;
 mod webhook;
+mod workflow;
 
 use axum::{
+    extract::{Path, State},
+    http::StatusCode,
     response::Json,
     routing::{get, post},
     Router,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::config::Config;
+use crate::executor::Executor;
+use crate::job::JobStore;
 use crate::webhook::{handle_webhook, AppState};
 
 #[tokio::main]
@@ -26,17 +34,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr: SocketAddr = config.bind_addr.parse()?;
 
     info!("Starting ActionRunner-rs on {}", bind_addr);
+    info!("Allowed repositories: {:?}", config.allowed_repositories);
+    info!("Workspace directory:  {}", config.workspace_dir.display());
+
     if config.webhook_secret.is_some() {
         info!("GitHub Webhook HMAC signature verification: ACTIVE");
     } else {
         info!("GitHub Webhook HMAC signature verification: DISABLED (set GITHUB_WEBHOOK_SECRET to enable)");
     }
 
-    let state = Arc::new(AppState { config });
+    let job_store = JobStore::new(100);
+    let (tx, rx) = mpsc::channel(32);
+
+    let executor = Arc::new(Executor::new(config.clone(), job_store.clone()));
+    tokio::spawn(executor.run_worker(rx));
+
+    let state = Arc::new(AppState {
+        config,
+        job_store,
+        tx,
+    });
 
     let app = Router::new()
         .route("/health", get(health_check))
-        .route("/webhook", post(handle_webhook).get(health_check))
+        .route("/webhook", post(handle_webhook))
+        .route("/jobs", get(list_jobs))
+        .route("/jobs/{id}", get(get_job))
+        .route("/jobs/{id}/log", get(get_job_log))
         .route("/", get(health_check))
         .with_state(state);
 
@@ -53,4 +77,36 @@ async fn health_check() -> Json<serde_json::Value> {
         "arch": "riscv64",
         "version": env!("CARGO_PKG_VERSION")
     }))
+}
+
+async fn list_jobs(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let jobs = state.job_store.list_jobs().await;
+    Json(serde_json::json!({
+        "jobs": jobs,
+        "total": jobs.len()
+    }))
+}
+
+async fn get_job(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match state.job_store.get_job(&job_id).await {
+        Some(record) => Ok(Json(serde_json::to_value(record).unwrap())),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Job not found", "job_id": job_id })),
+        )),
+    }
+}
+
+async fn get_job_log(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> Result<String, (StatusCode, &'static str)> {
+    let record = state.job_store.get_job(&job_id).await
+        .ok_or((StatusCode::NOT_FOUND, "Job not found"))?;
+
+    tokio::fs::read_to_string(&record.log_file).await
+        .map_err(|_| (StatusCode::NOT_FOUND, "Log file not found or not yet generated"))
 }
