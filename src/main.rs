@@ -210,14 +210,7 @@ async fn get_repo_badge(
     let repo_full = format!("{}/{}", owner, repo);
     let record = state.job_store.find_latest_job(&repo_full, None).await;
     let svg = badge::render_status_badge("k3-ci", record.as_ref());
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
-        ],
-        svg,
-    )
-        .into_response()
+    svg_response(svg)
 }
 
 async fn get_branch_badge(
@@ -230,14 +223,7 @@ async fn get_branch_badge(
         .find_latest_job(&repo_full, Some(&branch))
         .await;
     let svg = badge::render_status_badge("k3-ci", record.as_ref());
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
-        ],
-        svg,
-    )
-        .into_response()
+    svg_response(svg)
 }
 
 async fn get_repo_shield(
@@ -288,14 +274,7 @@ async fn get_repo_card(
         .map(|r| r.job.ref_name.trim_start_matches("refs/heads/").to_string())
         .unwrap_or_else(|| "main".to_string());
     let svg = badge::render_card_svg(&repo_full, &branch, record.as_ref());
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
-        ],
-        svg,
-    )
-        .into_response()
+    svg_response(svg)
 }
 
 async fn get_branch_card(
@@ -308,14 +287,7 @@ async fn get_branch_card(
         .find_latest_job(&repo_full, Some(&branch))
         .await;
     let svg = badge::render_card_svg(&repo_full, &branch, record.as_ref());
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
-        ],
-        svg,
-    )
-        .into_response()
+    svg_response(svg)
 }
 
 async fn get_repo_score_badge(
@@ -325,14 +297,7 @@ async fn get_repo_score_badge(
     let repo_full = format!("{}/{}", owner, repo);
     let record = state.job_store.find_latest_job(&repo_full, None).await;
     let svg = badge::render_score_badge(record.as_ref());
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
-        ],
-        svg,
-    )
-        .into_response()
+    svg_response(svg)
 }
 
 async fn get_branch_score_badge(
@@ -345,14 +310,7 @@ async fn get_branch_score_badge(
         .find_latest_job(&repo_full, Some(&branch))
         .await;
     let svg = badge::render_score_badge(record.as_ref());
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
-        ],
-        svg,
-    )
-        .into_response()
+    svg_response(svg)
 }
 
 async fn get_repo_coverage_badge(
@@ -362,14 +320,7 @@ async fn get_repo_coverage_badge(
     let repo_full = format!("{}/{}", owner, repo);
     let record = state.job_store.find_latest_job(&repo_full, None).await;
     let svg = badge::render_coverage_badge(record.as_ref());
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
-        ],
-        svg,
-    )
-        .into_response()
+    svg_response(svg)
 }
 
 async fn get_branch_coverage_badge(
@@ -382,14 +333,7 @@ async fn get_branch_coverage_badge(
         .find_latest_job(&repo_full, Some(&branch))
         .await;
     let svg = badge::render_coverage_badge(record.as_ref());
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
-        ],
-        svg,
-    )
-        .into_response()
+    svg_response(svg)
 }
 
 async fn get_repo_benchmark_badge(
@@ -399,14 +343,7 @@ async fn get_repo_benchmark_badge(
     let repo_full = format!("{}/{}", owner, repo);
     let record = state.job_store.find_latest_job(&repo_full, None).await;
     let svg = badge::render_benchmark_badge(record.as_ref());
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
-        ],
-        svg,
-    )
-        .into_response()
+    svg_response(svg)
 }
 
 async fn get_branch_benchmark_badge(
@@ -426,7 +363,7 @@ fn svg_response(svg: String) -> Response {
     (
         [
             (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+            (header::CACHE_CONTROL, "public, max-age=3600, s-maxage=3600"),
         ],
         svg,
     )
