@@ -201,7 +201,9 @@ impl Executor {
 
             // Sanitized standard environment defaulting to standard system toolchain
             let default_path = "/home/lma1980/.cargo/bin:/usr/local/bin:/usr/bin:/bin";
+            let cargo_home = self.config.workspace_dir.join(".cargo");
             cmd.env("PATH", default_path);
+            cmd.env("CARGO_HOME", cargo_home);
             cmd.env("CI", "true");
             cmd.env("ACTION_RUNNER", "true");
             cmd.env("GITHUB_EVENT_NAME", &job.event_type);
