@@ -66,6 +66,21 @@ pub fn evaluate_status(record: Option<&JobRecord>) -> BadgeInfo {
     }
 }
 
+pub fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Helper to render any 2-part flat SVG badge
 pub fn render_flat_badge(label: &str, status_text: &str, color_hex: &str) -> String {
     let char_width = 7.0;
@@ -78,6 +93,9 @@ pub fn render_flat_badge(label: &str, status_text: &str, color_hex: &str) -> Str
 
     let left_text_x = left_box_w / 2.0;
     let right_text_x = left_box_w + (right_box_w / 2.0);
+
+    let escaped_label = xml_escape(label);
+    let escaped_status = xml_escape(status_text);
 
     format!(
         r###"<svg xmlns="http://www.w3.org/2000/svg" width="{total_w}" height="20" role="img" aria-label="{label}: {status}">
@@ -108,8 +126,8 @@ pub fn render_flat_badge(label: &str, status_text: &str, color_hex: &str) -> Str
         right_text_x_10 = (right_text_x * 10.0).round(),
         label_text_w = ((label_len * char_width) * 10.0).round(),
         status_text_w = ((status_len * char_width) * 10.0).round(),
-        label = label,
-        status = status_text,
+        label = escaped_label,
+        status = escaped_status,
         color = color_hex,
     )
 }
@@ -381,10 +399,10 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
                     x = curr_x,
                     w = pill_w,
                     name_x = curr_x + 8,
-                    name = display_name,
+                    name = xml_escape(display_name),
                     score_x = curr_x + pill_w - 8,
                     color = pill_color,
-                    score = score_str,
+                    score = xml_escape(&score_str),
                 ));
                 curr_x += pill_w + 8;
             }
@@ -474,7 +492,7 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
   <text x="268" y="83" class="tile-val">{bench_val}</text>
   <text x="268" y="98" class="tile-sub">{bench_sub}</text>
 
-  <!-- Tile 4: Hygiene & Security -->
+  <!-- Tile 4: Hygiene &amp; Security -->
   <rect x="392" y="50" width="108" height="66" class="tile-bg"/>
   <text x="400" y="65" class="tile-label">SECURITY &amp; LINTS</text>
   <text x="400" y="83" class="tile-val">{hygiene_val}</text>
@@ -502,33 +520,33 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
   <text x="20" y="{footer_y}" class="footer-text">SpacemiT Key Stone K3 (8× X100 RISC-V @ 1.6GHz) • ActionRunner-rs Factory Pipeline</text>
 </svg>"###,
         card_height = card_height,
-        repo = repo,
-        branch = branch,
+        repo = xml_escape(repo),
+        branch = xml_escape(branch),
         card_badge_bg = info.card_badge_bg,
         score_badge_bg = score_badge_bg,
         icon_char = info.icon_char,
         status_uppercase = status_uppercase,
         quality_score = quality_score,
         letter_grade = letter_grade,
-        tests_val = tests_val,
-        tests_sub = tests_sub,
+        tests_val = xml_escape(&tests_val),
+        tests_sub = xml_escape(&tests_sub),
         tests_bar_w = tests_bar_w,
-        cov_val = cov_val,
-        cov_sub = cov_sub,
+        cov_val = xml_escape(&cov_val),
+        cov_sub = xml_escape(&cov_sub),
         cov_bar_w = cov_bar_w,
-        bench_val = bench_val,
-        bench_sub = bench_sub,
-        hygiene_val = hygiene_val,
-        hygiene_sub = hygiene_sub,
+        bench_val = xml_escape(&bench_val),
+        bench_sub = xml_escape(&bench_sub),
+        hygiene_val = xml_escape(&hygiene_val),
+        hygiene_sub = xml_escape(&hygiene_sub),
         submodules_svg = submodules_svg,
         div2_y = div2_y,
         row3_y = row3_y,
         div3_y = div3_y,
         footer_y = footer_y,
-        commit_short = commit_short,
-        trigger_text = trigger_text,
-        duration_str = duration_str,
-        timestamp_str = timestamp_str,
+        commit_short = xml_escape(&commit_short),
+        trigger_text = xml_escape(&trigger_text),
+        duration_str = xml_escape(&duration_str),
+        timestamp_str = xml_escape(&timestamp_str),
     )
 }
 
@@ -716,8 +734,46 @@ mod tests {
         assert!(svg.contains("89.5%"));
         assert!(svg.contains("CARGO BENCH"));
         assert!(svg.contains("0 Advisories"));
+        assert!(svg.contains("Clippy &amp; Fmt Clean"));
         assert!(svg.contains("SUBMODULES"));
         assert!(svg.contains("k3-core"));
         assert!(svg.contains("k3-engine"));
+    }
+
+    #[test]
+    fn test_render_card_svg_xml_escaping() {
+        let record = JobRecord {
+            job: sample_job("refs/heads/feature<test&fun>"),
+            status: JobStatus::Completed {
+                duration_secs: 2,
+                exit_code: 0,
+            },
+            log_file: PathBuf::from("logs/sample.log"),
+            updated_at: Utc::now(),
+            metrics: Some(JobMetrics {
+                quality_score: 100,
+                letter_grade: "A+".to_string(),
+                coverage_pct: Some(95.0),
+                benchmark_summary: Some("1 benches (12 & 34 ns)".to_string()),
+                tests_passed: 10,
+                tests_total: 10,
+                advisories_count: 0,
+                clippy_warnings: 0,
+                submodules: Default::default(),
+            }),
+        };
+
+        let svg = render_card_svg(
+            "LMA1980/model<runner>&co",
+            "feature<test&fun>",
+            Some(&record),
+        );
+        assert!(svg.contains("LMA1980/model&lt;runner&gt;&amp;co"));
+        assert!(svg.contains("feature&lt;test&amp;fun&gt;"));
+        assert!(svg.contains("Clippy &amp; Fmt Clean"));
+        assert!(svg.contains("1 benches (12 &amp; 34 ns)"));
+
+        // Verify there is no bare '&' followed by a space
+        assert!(!svg.contains("& "));
     }
 }
