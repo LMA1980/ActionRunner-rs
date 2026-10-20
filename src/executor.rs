@@ -45,9 +45,7 @@ impl Executor {
         if let Some(parent) = log_file_path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        if let Some(parent) = repo_workspace.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
+        let _ = tokio::fs::create_dir_all(&repo_workspace).await;
 
         let mut log = match OpenOptions::new().create(true).append(true).open(&log_file_path) {
             Ok(f) => f,
@@ -244,7 +242,12 @@ impl Executor {
         if !repo_dir.join(".git").exists() {
             let _ = writeln!(log, "[ActionRunner-rs] Cloning repository {} into {}", job.repo_name, repo_dir.display());
             let mut clone_cmd = Command::new("git");
-            clone_cmd.arg("clone").arg(&job.clone_url).arg(".");
+            let git_url = if std::path::Path::new("/home/lma1980/.ssh/id_k3_ci").exists() {
+                format!("git@github.com:{}.git", job.repo_name)
+            } else {
+                job.clone_url.clone()
+            };
+            clone_cmd.arg("clone").arg(&git_url).arg(".");
             clone_cmd.current_dir(repo_dir);
 
             clone_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
