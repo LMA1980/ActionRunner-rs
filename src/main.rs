@@ -81,9 +81,11 @@ async fn health_check() -> Json<serde_json::Value> {
 
 async fn list_jobs(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let jobs = state.job_store.list_jobs().await;
+    let job_ids: Vec<String> = jobs.iter().map(|j| j.job.id.clone()).collect();
     Json(serde_json::json!({
-        "jobs": jobs,
-        "total": jobs.len()
+        "job_ids": job_ids,
+        "total": jobs.len(),
+        "jobs": jobs
     }))
 }
 
