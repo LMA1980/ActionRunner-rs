@@ -1,7 +1,7 @@
 use chrono::Utc;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,7 +28,7 @@ impl Executor {
         info!("ActionRunner executor worker started (concurrency = 1)");
 
         while let Some(job) = rx.recv().await {
-            info!(job_id = %job.id, repo = %job.repo_name, commit = %job.commit_sha, "Starting job execution");
+            info!(job_id = %job.id, event = %job.event_type, repo = %job.repo_name, commit = %job.commit_sha, "Starting job execution");
             self.execute_job(job).await;
         }
 
@@ -58,6 +58,7 @@ impl Executor {
 
         let _ = writeln!(log, "================================================================================");
         let _ = writeln!(log, "ActionRunner-rs Job Execution: {}", job.id);
+        let _ = writeln!(log, "Event:      {}", job.event_type);
         let _ = writeln!(log, "Repository: {}", job.repo_name);
         let _ = writeln!(log, "Commit SHA: {}", job.commit_sha);
         let _ = writeln!(log, "Ref:        {}", job.ref_name);
@@ -73,28 +74,20 @@ impl Executor {
             return;
         }
 
-        // 2. Discover YAML Workflow
-        let workflow_file_yml = repo_workspace.join(".github/action-runner.yml");
-        let workflow_file_yaml = repo_workspace.join(".github/action-runner.yaml");
-
-        let workflow_path = if workflow_file_yml.exists() {
-            Some(workflow_file_yml)
-        } else if workflow_file_yaml.exists() {
-            Some(workflow_file_yaml)
-        } else {
-            None
-        };
-
-        let workflow_path = match workflow_path {
+        // 2. Discover Event-Driven YAML Workflow (.actionrunner/on-<event>.yml)
+        let workflow_path = match self.resolve_workflow_file(&repo_workspace, &job.event_type) {
             Some(p) => p,
             None => {
-                let msg = "No .github/action-runner.yml (or .yaml) found in repository";
+                let msg = format!("No .actionrunner/on-{}.yml workflow found in repository", job.event_type);
                 info!(job_id = %job.id, "{}", msg);
                 let _ = writeln!(log, "\n[ActionRunner-rs] {}. Skipping workflow.", msg);
-                self.job_store.update_status(&job.id, JobStatus::Skipped { reason: msg.to_string() }).await;
+                self.job_store.update_status(&job.id, JobStatus::Skipped { reason: msg }).await;
                 return;
             }
         };
+
+        let workflow_rel = workflow_path.strip_prefix(&repo_workspace).unwrap_or(&workflow_path);
+        let _ = writeln!(log, "[ActionRunner-rs] Loaded workflow file: {}\n", workflow_rel.display());
 
         // 3. Parse & Validate YAML
         let content = match tokio::fs::read_to_string(&workflow_path).await {
@@ -142,8 +135,8 @@ impl Executor {
             // Sanitized standard environment
             cmd.env("PATH", "/home/lma1980/opt/llvm-24/bin:/home/lma1980/opt/gcc-17-stage3-spacemit-x100/bin:/home/lma1980/.cargo/bin:/usr/local/bin:/usr/bin:/bin");
             cmd.env("CI", "true");
-            cmd.env("GITHUB_ACTIONS", "true");
             cmd.env("ACTION_RUNNER", "true");
+            cmd.env("GITHUB_EVENT_NAME", &job.event_type);
             cmd.env("GITHUB_REPOSITORY", &job.repo_name);
             cmd.env("GITHUB_SHA", &job.commit_sha);
             cmd.env("GITHUB_REF", &job.ref_name);
@@ -238,12 +231,50 @@ impl Executor {
         self.job_store.update_status(&job.id, JobStatus::Completed { duration_secs: duration, exit_code: 0 }).await;
     }
 
+    fn resolve_workflow_file(&self, repo_workspace: &Path, event_type: &str) -> Option<PathBuf> {
+        let actionrunner_dir = repo_workspace.join(".actionrunner");
+        let event_lower = event_type.to_ascii_lowercase();
+
+        let mut candidates = Vec::new();
+        candidates.push(format!("on-{}.yml", event_lower));
+        candidates.push(format!("on-{}.yaml", event_lower));
+
+        if event_lower == "pull_request" || event_lower == "pullrequest" {
+            candidates.push("on-pullrequest.yml".to_string());
+            candidates.push("on-pullrequest.yaml".to_string());
+            candidates.push("on-pull-request.yml".to_string());
+            candidates.push("on-pull-request.yaml".to_string());
+            candidates.push("on-pull_request.yml".to_string());
+            candidates.push("on-pull_request.yaml".to_string());
+        }
+
+        for candidate in candidates {
+            let path = actionrunner_dir.join(&candidate);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+
+        // Backwards compatibility fallback
+        let legacy_yml = repo_workspace.join(".github/action-runner.yml");
+        if legacy_yml.exists() {
+            return Some(legacy_yml);
+        }
+        let legacy_yaml = repo_workspace.join(".github/action-runner.yaml");
+        if legacy_yaml.exists() {
+            return Some(legacy_yaml);
+        }
+
+        None
+    }
+
     async fn sync_git_repo(&self, job: &Job, repo_dir: &Path, log: &mut std::fs::File) -> Result<(), String> {
         if !repo_dir.join(".git").exists() {
             let display_dir = repo_dir.strip_prefix(&self.config.workspace_dir).unwrap_or(repo_dir);
             let _ = writeln!(log, "[ActionRunner-rs] Cloning repository {} into {}", job.repo_name, display_dir.display());
+
             let mut clone_cmd = Command::new("git");
-            let git_url = if std::path::Path::new("/home/lma1980/.ssh/id_k3_ci").exists() {
+            let git_url = if Path::new("/home/lma1980/.ssh/id_k3_ci").exists() {
                 format!("git@github.com:{}.git", job.repo_name)
             } else {
                 job.clone_url.clone()
@@ -259,9 +290,11 @@ impl Executor {
                 return Err(format!("git clone failed with code: {:?}", status.code()));
             }
         } else {
-            let _ = writeln!(log, "[ActionRunner-rs] Fetching latest refs from origin");
+            let _ = writeln!(log, "[ActionRunner-rs] Fetching latest refs and pull requests from origin");
             let mut fetch_cmd = Command::new("git");
-            fetch_cmd.arg("fetch").arg("--tags").arg("origin");
+            fetch_cmd.arg("fetch").arg("--tags").arg("origin")
+                .arg("+refs/heads/*:refs/remotes/origin/*")
+                .arg("+refs/pull/*/head:refs/remotes/origin/pr/*");
             fetch_cmd.current_dir(repo_dir);
 
             fetch_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));

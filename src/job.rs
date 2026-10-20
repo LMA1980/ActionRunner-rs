@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
+    pub event_type: String,
     pub repo_name: String,
     pub clone_url: String,
     pub commit_sha: String,

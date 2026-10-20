@@ -136,7 +136,21 @@ pub async fn handle_webhook(
         ));
     }
 
-    if event == "push" {
+    let default_clone_url = payload
+        .get("repository")
+        .and_then(|r| r.get("clone_url"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let sender = payload
+        .get("sender")
+        .and_then(|s| s.get("login"))
+        .and_then(|l| l.as_str())
+        .unwrap_or("github")
+        .to_string();
+
+    let (commit_sha, ref_name, clone_url, should_run) = if event == "push" {
         let commit_sha = payload
             .get("after")
             .and_then(|s| s.as_str())
@@ -155,94 +169,122 @@ pub async fn handle_webhook(
             .unwrap_or("refs/heads/main")
             .to_string();
 
-        let clone_url = payload
-            .get("repository")
-            .and_then(|r| r.get("clone_url"))
-            .and_then(|c| c.as_str())
+        if commit_sha == "0000000000000000000000000000000000000000" {
+            info!(ref_name = %ref_name, "Branch deletion push ignored");
+            ("".to_string(), "".to_string(), "".to_string(), false)
+        } else {
+            (commit_sha, ref_name, default_clone_url, true)
+        }
+    } else if event == "pull_request" {
+        let action = payload
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("");
+
+        if !matches!(action, "opened" | "synchronize" | "reopened") {
+            info!(action = %action, repo = %repo_name, "Pull request action does not trigger CI");
+            ("".to_string(), "".to_string(), "".to_string(), false)
+        } else {
+            let pr = payload.get("pull_request");
+            let commit_sha = pr
+                .and_then(|p| p.get("head"))
+                .and_then(|h| h.get("sha"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let ref_name = pr
+                .and_then(|p| p.get("head"))
+                .and_then(|h| h.get("ref"))
+                .and_then(|r| r.as_str())
+                .unwrap_or("pr-branch")
+                .to_string();
+
+            let clone_url = pr
+                .and_then(|p| p.get("head"))
+                .and_then(|h| h.get("repo"))
+                .and_then(|r| r.get("clone_url"))
+                .and_then(|c| c.as_str())
+                .unwrap_or(&default_clone_url)
+                .to_string();
+
+            (commit_sha, ref_name, clone_url, true)
+        }
+    } else {
+        // Generic event fallback
+        let commit_sha = payload
+            .get("after")
+            .and_then(|s| s.as_str())
             .unwrap_or("")
             .to_string();
 
-        let sender = payload
-            .get("sender")
-            .and_then(|s| s.get("login"))
-            .and_then(|l| l.as_str())
-            .unwrap_or("github")
+        let ref_name = payload
+            .get("ref")
+            .and_then(|r| r.as_str())
+            .unwrap_or("refs/heads/main")
             .to_string();
 
-        if commit_sha.is_empty() || clone_url.is_empty() {
-            warn!("Push event missing required commit SHA or clone URL");
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "Missing commit SHA or clone URL in push event"
-                })),
-            ));
+        if commit_sha.is_empty() {
+            (commit_sha, ref_name, default_clone_url, false)
+        } else {
+            (commit_sha, ref_name, default_clone_url, true)
         }
+    };
 
-        // Avoid triggering on deleted branches (0000000000000000000000000000000000000000)
-        if commit_sha == "0000000000000000000000000000000000000000" {
-            info!(ref_name = %ref_name, "Branch deletion push ignored");
-            return Ok((
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "ignored",
-                    "reason": "branch deletion"
-                })),
-            ));
-        }
-
-        let sha_short = &commit_sha[..8.min(commit_sha.len())];
-        let job_id = format!("job-{}-{}", Utc::now().timestamp(), sha_short);
-
-        let job = Job {
-            id: job_id.clone(),
-            repo_name: repo_name.clone(),
-            clone_url,
-            commit_sha: commit_sha.clone(),
-            ref_name: ref_name.clone(),
-            sender,
-            queued_at: Utc::now(),
-        };
-
-        let log_file = std::path::Path::new("logs")
-            .join(&repo_name)
-            .join(format!("{}.log", job.id));
-
-        state.job_store.add_job(job.clone(), log_file).await;
-
-        if let Err(e) = state.tx.send(job).await {
-            error!(error = %e, "Failed to enqueue job onto executor channel");
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to enqueue job",
-                    "details": e.to_string()
-                })),
-            ));
-        }
-
-        info!(job_id = %job_id, repo = %repo_name, commit = %commit_sha, "Job enqueued successfully");
-
+    if !should_run || commit_sha.is_empty() {
+        info!(event = %event, repo = %repo_name, "Event accepted with no pending run");
         return Ok((
-            StatusCode::ACCEPTED,
+            StatusCode::OK,
             Json(serde_json::json!({
-                "status": "queued",
-                "job_id": job_id,
-                "repository": repo_name,
-                "commit_sha": commit_sha,
-                "ref": ref_name
+                "status": "ignored",
+                "event": event,
+                "repository": repo_name
             })),
         ));
     }
 
-    info!(event = %event, repo = %repo_name, "Event accepted but no runner trigger configured");
+    let sha_short = &commit_sha[..8.min(commit_sha.len())];
+    let job_id = format!("job-{}-{}", Utc::now().timestamp(), sha_short);
+
+    let job = Job {
+        id: job_id.clone(),
+        event_type: event.clone(),
+        repo_name: repo_name.clone(),
+        clone_url,
+        commit_sha: commit_sha.clone(),
+        ref_name: ref_name.clone(),
+        sender,
+        queued_at: Utc::now(),
+    };
+
+    let log_file = std::path::Path::new("logs")
+        .join(&repo_name)
+        .join(format!("{}.log", job.id));
+
+    state.job_store.add_job(job.clone(), log_file).await;
+
+    if let Err(e) = state.tx.send(job).await {
+        error!(error = %e, "Failed to enqueue job onto executor channel");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "Failed to enqueue job",
+                "details": e.to_string()
+            })),
+        ));
+    }
+
+    info!(job_id = %job_id, event = %event, repo = %repo_name, commit = %commit_sha, "Job enqueued successfully");
+
     Ok((
-        StatusCode::OK,
+        StatusCode::ACCEPTED,
         Json(serde_json::json!({
-            "status": "received",
+            "status": "queued",
+            "job_id": job_id,
             "event": event,
             "repository": repo_name,
-            "message": "Event received; no execution required"
+            "commit_sha": commit_sha,
+            "ref": ref_name
         })),
     ))
 }
