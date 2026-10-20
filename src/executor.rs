@@ -240,7 +240,8 @@ impl Executor {
 
     async fn sync_git_repo(&self, job: &Job, repo_dir: &Path, log: &mut std::fs::File) -> Result<(), String> {
         if !repo_dir.join(".git").exists() {
-            let _ = writeln!(log, "[ActionRunner-rs] Cloning repository {} into {}", job.repo_name, repo_dir.display());
+            let display_dir = repo_dir.strip_prefix(&self.config.workspace_dir).unwrap_or(repo_dir);
+            let _ = writeln!(log, "[ActionRunner-rs] Cloning repository {} into {}", job.repo_name, display_dir.display());
             let mut clone_cmd = Command::new("git");
             let git_url = if std::path::Path::new("/home/lma1980/.ssh/id_k3_ci").exists() {
                 format!("git@github.com:{}.git", job.repo_name)

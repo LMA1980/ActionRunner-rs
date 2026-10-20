@@ -109,6 +109,7 @@ async fn get_job_log(
     let record = state.job_store.get_job(&job_id).await
         .ok_or((StatusCode::NOT_FOUND, "Job not found"))?;
 
-    tokio::fs::read_to_string(&record.log_file).await
+    let full_path = state.config.workspace_dir.join(&record.log_file);
+    tokio::fs::read_to_string(&full_path).await
         .map_err(|_| (StatusCode::NOT_FOUND, "Log file not found or not yet generated"))
 }

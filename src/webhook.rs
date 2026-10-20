@@ -204,8 +204,7 @@ pub async fn handle_webhook(
             queued_at: Utc::now(),
         };
 
-        let log_file = state.config.workspace_dir
-            .join("logs")
+        let log_file = std::path::Path::new("logs")
             .join(&repo_name)
             .join(format!("{}.log", job.id));
 
