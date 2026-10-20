@@ -29,11 +29,31 @@ pub enum JobStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobMetrics {
+    pub quality_score: u32,
+    pub letter_grade: String,
+    #[serde(default)]
+    pub coverage_pct: Option<f64>,
+    #[serde(default)]
+    pub benchmark_summary: Option<String>,
+    #[serde(default)]
+    pub tests_passed: u32,
+    #[serde(default)]
+    pub tests_total: u32,
+    #[serde(default)]
+    pub advisories_count: u32,
+    #[serde(default)]
+    pub clippy_warnings: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRecord {
     pub job: Job,
     pub status: JobStatus,
     pub log_file: PathBuf,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub metrics: Option<JobMetrics>,
 }
 
 #[derive(Clone)]
@@ -98,7 +118,19 @@ impl JobStore {
                 status: JobStatus::Queued,
                 log_file,
                 updated_at: Utc::now(),
+                metrics: None,
             });
+        }
+        self.persist().await;
+    }
+
+    pub async fn update_metrics(&self, job_id: &str, metrics: JobMetrics) {
+        {
+            let mut store = self.inner.write().await;
+            if let Some(record) = store.iter_mut().find(|r| r.job.id == job_id) {
+                record.metrics = Some(metrics);
+                record.updated_at = Utc::now();
+            }
         }
         self.persist().await;
     }

@@ -11,7 +11,7 @@ use tokio::time::timeout;
 use tracing::{error, info};
 
 use crate::config::Config;
-use crate::job::{Job, JobStatus, JobStore};
+use crate::job::{Job, JobMetrics, JobStatus, JobStore};
 use crate::workflow::WorkflowConfig;
 
 pub struct Executor {
@@ -294,6 +294,10 @@ impl Executor {
                         let code = exit_status.code().unwrap_or(-1);
                         let err = format!("Step '{}' failed with exit code: {}", step.name, code);
                         let _ = writeln!(log, "\n[ActionRunner-rs ERROR] {}", err);
+                        let metrics = self
+                            .extract_or_compute_metrics(&repo_workspace, &log_file_path, false)
+                            .await;
+                        self.job_store.update_metrics(&job.id, metrics).await;
                         self.job_store
                             .update_status(&job.id, JobStatus::Failed { error: err })
                             .await;
@@ -335,6 +339,10 @@ impl Executor {
         );
 
         info!(job_id = %job.id, duration_secs = duration, "Job completed successfully");
+        let metrics = self
+            .extract_or_compute_metrics(&repo_workspace, &log_file_path, true)
+            .await;
+        self.job_store.update_metrics(&job.id, metrics).await;
         self.job_store
             .update_status(
                 &job.id,
@@ -498,5 +506,151 @@ impl Executor {
         }
 
         Ok(())
+    }
+
+    async fn extract_or_compute_metrics(
+        &self,
+        repo_workspace: &Path,
+        log_file_path: &Path,
+        is_success: bool,
+    ) -> JobMetrics {
+        let metrics_file = repo_workspace.join(".actionrunner/metrics.json");
+        if metrics_file.exists() {
+            if let Ok(content) = tokio::fs::read_to_string(&metrics_file).await {
+                if let Ok(metrics) = serde_json::from_str::<JobMetrics>(&content) {
+                    return metrics;
+                }
+            }
+        }
+
+        // Auto-derive metrics from execution log file
+        let log_content = tokio::fs::read_to_string(log_file_path)
+            .await
+            .unwrap_or_default();
+        let mut tests_passed = 0;
+        let mut tests_total = 0;
+        let mut bench_count = 0;
+        let mut bench_last_time = String::new();
+        let mut coverage_pct: Option<f64> = None;
+        let mut advisories_count = 0;
+        let mut clippy_warnings = 0;
+
+        for line in log_content.lines() {
+            // Test results: "test result: ok. 4 passed; 0 failed; ..."
+            if line.contains("test result: ok.") || line.contains("test result: FAILED.") {
+                if let Some(passed_str) = line
+                    .split("passed;")
+                    .next()
+                    .and_then(|s| s.split_whitespace().last())
+                {
+                    if let Ok(p) = passed_str.parse::<u32>() {
+                        tests_passed += p;
+                        tests_total += p;
+                    }
+                }
+                if let Some(failed_part) = line.split("passed;").nth(1) {
+                    if let Some(failed_str) = failed_part
+                        .split("failed;")
+                        .next()
+                        .and_then(|s| s.split_whitespace().last())
+                    {
+                        if let Ok(f) = failed_str.parse::<u32>() {
+                            tests_total += f;
+                        }
+                    }
+                }
+            }
+
+            // Benchmark results from `cargo bench`: "test bench_name ... bench: 12,345 ns/iter"
+            if line.contains("... bench:") {
+                bench_count += 1;
+                if let Some(time_part) = line.split("... bench:").nth(1) {
+                    bench_last_time = time_part
+                        .split("(+/-")
+                        .next()
+                        .unwrap_or(time_part)
+                        .trim()
+                        .to_string();
+                }
+            }
+
+            // Code Coverage: "TOTAL ... 89.5%" or "Lines: 89.5%"
+            if line.contains("Lines:") || (line.starts_with("TOTAL") && line.contains('%')) {
+                for token in line.split_whitespace().rev() {
+                    if token.ends_with('%') {
+                        if let Ok(pct) = token.trim_end_matches('%').parse::<f64>() {
+                            coverage_pct = Some(pct);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Clippy warning count
+            if line.contains("warning: ") && line.contains("[-D clippy::") {
+                clippy_warnings += 1;
+            }
+
+            // Cargo audit security advisories
+            if line.contains("vulnerabilities found") {
+                if let Some(num_str) = line.split_whitespace().next() {
+                    if let Ok(n) = num_str.parse::<u32>() {
+                        advisories_count = n;
+                    }
+                }
+            }
+        }
+
+        let benchmark_summary = if bench_count > 0 {
+            if !bench_last_time.is_empty() {
+                Some(format!("{} benches ({})", bench_count, bench_last_time))
+            } else {
+                Some(format!("{} benches passed", bench_count))
+            }
+        } else {
+            None
+        };
+
+        // Score formula out of 100
+        let quality_score = if is_success {
+            let mut score = 100u32;
+            if clippy_warnings > 0 {
+                score = score.saturating_sub((clippy_warnings * 5).min(20));
+            }
+            if advisories_count > 0 {
+                score = score.saturating_sub((advisories_count * 10).min(30));
+            }
+            if tests_total > 0 && tests_passed < tests_total {
+                let fail_ratio = (tests_total - tests_passed) as f64 / tests_total as f64;
+                score = score.saturating_sub((fail_ratio * 40.0) as u32);
+            }
+            if let Some(cov) = coverage_pct {
+                if cov < 80.0 {
+                    score = score.saturating_sub(((80.0 - cov) * 0.5) as u32);
+                }
+            }
+            score.max(1)
+        } else {
+            40u32
+        };
+
+        let letter_grade = match quality_score {
+            95..=100 => "A+".to_string(),
+            90..=94 => "A".to_string(),
+            80..=89 => "B".to_string(),
+            70..=79 => "C".to_string(),
+            _ => "F".to_string(),
+        };
+
+        JobMetrics {
+            quality_score,
+            letter_grade,
+            coverage_pct,
+            benchmark_summary,
+            tests_passed,
+            tests_total,
+            advisories_count,
+            clippy_warnings,
+        }
     }
 }
