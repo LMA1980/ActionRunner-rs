@@ -265,9 +265,13 @@ impl Executor {
                             "--property=ReadWritePaths={}",
                             self.config.workspace_dir.display()
                         ))
-                        .arg("--property=MemoryMax=6G")
-                        .arg("--property=CPUQuota=600%")
-                        .arg("--property=TasksMax=1024")
+                        .arg("--property=MemoryMax=6G");
+
+                    if let Some(ref quota) = self.config.cpu_quota {
+                        scmd.arg(format!("--property=CPUQuota={}", quota));
+                    }
+
+                    scmd.arg("--property=TasksMax=1024")
                         .arg("--")
                         .arg("bash")
                         .arg("-e")
@@ -1309,6 +1313,7 @@ mod tests {
             job_timeout_seconds: 60,
             log_api_key: None,
             isolation_mode: crate::config::IsolationMode::None,
+            cpu_quota: Some("1400%".to_string()),
         };
         let job_store = JobStore::new(10, None);
         let executor = Executor::new(config, job_store);
@@ -1504,6 +1509,7 @@ mod tests {
             job_timeout_seconds: 60,
             log_api_key: None,
             isolation_mode: crate::config::IsolationMode::None,
+            cpu_quota: Some("1400%".to_string()),
         };
         let job_store = JobStore::new(10, None);
         let executor = Executor::new(config, job_store);
@@ -1595,6 +1601,7 @@ TOTAL                             30                 2    93.33%           7    
             job_timeout_seconds: 60,
             log_api_key: None,
             isolation_mode: crate::config::IsolationMode::None,
+            cpu_quota: Some("1400%".to_string()),
         };
         let job_store = JobStore::new(10, None);
         let executor = Executor::new(config, job_store);

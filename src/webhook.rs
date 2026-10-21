@@ -508,6 +508,7 @@ mod tests {
             job_timeout_seconds: 60,
             log_api_key: None,
             isolation_mode: crate::config::IsolationMode::None,
+            cpu_quota: Some("1400%".to_string()),
         };
         let job_store = JobStore::new(10, None);
         (

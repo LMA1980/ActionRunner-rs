@@ -32,9 +32,13 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 ReadWritePaths=/var/lib/action-runner
 InaccessiblePaths=/etc/shadow /root
 
-# CGroup v2 Resource Constraints (SpacemiT K3 8x Core Tuning)
+# CGroup v2 Resource Constraints (SpacemiT K3 16-Core Topology Tuning)
+# The patched Linux kernel registers 16 cores. Setting CPUQuota=1400%
+# allocates up to 14 cores for native compilation, guaranteeing 2 cores (200%)
+# remain reserved for the control plane, Nginx reverse proxy, and SSH recovery.
+Environment=ACTION_RUNNER_CPU_QUOTA=1400%
 MemoryMax=6G
-CPUQuota=600%
+CPUQuota=1400%
 TasksMax=1024
 
 [Install]

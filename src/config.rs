@@ -40,6 +40,7 @@ pub struct Config {
     pub job_timeout_seconds: u64,
     pub log_api_key: Option<String>,
     pub isolation_mode: IsolationMode,
+    pub cpu_quota: Option<String>,
 }
 
 impl Config {
@@ -140,6 +141,26 @@ impl Config {
             _ => IsolationMode::None,
         };
 
+        // SpacemiT K3 16-core kernel awareness:
+        // By default, reserves 2 cores (200%) for OS, SSH recovery, and Nginx.
+        // On a 16-core reporting system, allocates up to 1400% (14 cores) for builds.
+        let cpu_quota = env::var("ACTION_RUNNER_CPU_QUOTA")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                let num_cpus = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(8);
+                if num_cpus >= 16 {
+                    Some("1400%".to_string())
+                } else if num_cpus >= 8 {
+                    Some("700%".to_string())
+                } else {
+                    Some(format!("{}00%", num_cpus.saturating_sub(1).max(1)))
+                }
+            });
+
         Self {
             bind_addr,
             webhook_secret,
@@ -152,6 +173,7 @@ impl Config {
             job_timeout_seconds,
             log_api_key,
             isolation_mode,
+            cpu_quota,
         }
     }
 
@@ -229,6 +251,7 @@ mod tests {
             job_timeout_seconds: 600,
             log_api_key: None,
             isolation_mode: IsolationMode::None,
+            cpu_quota: Some("1400%".to_string()),
         };
 
         assert!(config.is_repo_allowed("LMA1980/ActionRunner-rs"));
@@ -258,6 +281,7 @@ mod tests {
             job_timeout_seconds: 600,
             log_api_key: None,
             isolation_mode: IsolationMode::None,
+            cpu_quota: Some("1400%".to_string()),
         };
 
         assert!(config.is_pr_author_allowed("OWNER"));
