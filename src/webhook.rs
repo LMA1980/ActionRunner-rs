@@ -9,7 +9,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::job::{Job, JobStore};
@@ -326,26 +326,34 @@ pub async fn handle_webhook(
         .join(&repo_name)
         .join(format!("{}.log", job.id));
 
-    state.job_store.add_job(job.clone(), log_file).await;
+    let enqueue_res = state.job_store.enqueue_job(job.clone(), log_file).await;
+    let final_job_id = enqueue_res.job_id;
+    let _ = state.tx.try_send(job);
 
-    if let Err(e) = state.tx.send(job).await {
-        error!(error = %e, "Failed to enqueue job onto executor channel");
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": "Failed to enqueue job",
-                "details": e.to_string()
-            })),
-        ));
+    if !enqueue_res.superseded_jobs.is_empty() {
+        info!(
+            job_id = %final_job_id,
+            superseded = ?enqueue_res.superseded_jobs,
+            "Coalesced older queued jobs for same repository and ref"
+        );
     }
 
-    info!(job_id = %job_id, event = %event_type, repo = %repo_name, commit = %commit_sha, "Job enqueued successfully");
+    info!(
+        job_id = %final_job_id,
+        queue_position = enqueue_res.queue_position,
+        event = %event_type,
+        repo = %repo_name,
+        commit = %commit_sha,
+        "Job enqueued successfully"
+    );
 
     Ok((
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
             "status": "queued",
-            "job_id": job_id,
+            "job_id": final_job_id,
+            "queue_position": enqueue_res.queue_position,
+            "superseded_jobs": enqueue_res.superseded_jobs,
             "event": event_type,
             "repository": repo_name,
             "commit_sha": commit_sha,

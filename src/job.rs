@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,9 +77,47 @@ pub struct JobRecord {
     pub metrics: Option<JobMetrics>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnqueueResult {
+    pub job_id: String,
+    pub queue_position: usize,
+    pub superseded_jobs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueItemView {
+    pub position: usize,
+    pub wait_secs: u64,
+    pub elapsed_secs: Option<u64>,
+    pub record: JobRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QueueStats {
+    pub total_jobs: usize,
+    pub running_jobs: usize,
+    pub queued_jobs: usize,
+    pub completed_jobs: usize,
+    pub failed_jobs: usize,
+    pub skipped_jobs: usize,
+    pub superseded_jobs: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueSnapshot {
+    pub status: String,
+    pub concurrency: usize,
+    pub queue_depth: usize,
+    pub active_job: Option<QueueItemView>,
+    pub queued_jobs: Vec<QueueItemView>,
+    pub stats: QueueStats,
+    pub recent_jobs: Vec<JobRecord>,
+}
+
 #[derive(Clone)]
 pub struct JobStore {
     inner: Arc<RwLock<VecDeque<JobRecord>>>,
+    notify: Arc<Notify>,
     max_history: usize,
     index_file: Option<PathBuf>,
 }
@@ -88,11 +126,25 @@ impl JobStore {
     pub fn new(max_history: usize, workspace_dir: Option<&Path>) -> Self {
         let index_file = workspace_dir.map(|w| w.join("logs").join("jobs_index.json"));
         let mut initial_jobs = VecDeque::with_capacity(max_history);
+        let notify = Arc::new(Notify::new());
 
         if let Some(ref path) = index_file {
             if path.exists() {
                 if let Ok(content) = std::fs::read_to_string(path) {
-                    if let Ok(jobs) = serde_json::from_str::<VecDeque<JobRecord>>(&content) {
+                    if let Ok(mut jobs) = serde_json::from_str::<VecDeque<JobRecord>>(&content) {
+                        let mut has_queued = false;
+                        for rec in jobs.iter_mut() {
+                            if matches!(rec.status, JobStatus::Running { .. }) {
+                                rec.status = JobStatus::Queued;
+                                rec.updated_at = Utc::now();
+                            }
+                            if matches!(rec.status, JobStatus::Queued) {
+                                has_queued = true;
+                            }
+                        }
+                        if has_queued {
+                            notify.notify_one();
+                        }
                         info!(
                             "Restored {} job records from {}",
                             jobs.len(),
@@ -109,6 +161,7 @@ impl JobStore {
 
         Self {
             inner: Arc::new(RwLock::new(initial_jobs)),
+            notify,
             max_history,
             index_file,
         }
@@ -128,21 +181,208 @@ impl JobStore {
         }
     }
 
-    pub async fn add_job(&self, job: Job, log_file: PathBuf) {
+    /// Enqueues a job into the coalescing FIFO queue.
+    /// If any older job for the same `(repo_name, ref_name, event_type)` is currently `Queued`
+    /// waiting for execution, it is marked as `Skipped` (superseded by this newer commit) so
+    /// limited host resources only build the latest commit on that ref.
+    pub async fn enqueue_job(&self, mut job: Job, mut log_file: PathBuf) -> EnqueueResult {
+        let now = Utc::now();
+        let mut superseded_jobs = Vec::new();
+        let queue_position;
+
         {
             let mut store = self.inner.write().await;
-            if store.len() >= self.max_history {
-                store.pop_back();
+
+            // Ensure unique job.id even when multiple webhooks arrive within the same second
+            let base_id = job.id.clone();
+            let mut suffix = 2u32;
+            while store.iter().any(|r| r.job.id == job.id) {
+                job.id = format!("{}-{}", base_id, suffix);
+                log_file = Path::new("logs")
+                    .join(&job.repo_name)
+                    .join(format!("{}.log", job.id));
+                suffix += 1;
             }
+
+            let sha_short = &job.commit_sha[..8.min(job.commit_sha.len())];
+
+            // Coalesce any older still-Queued jobs for the same repo + ref + event_type
+            for record in store.iter_mut() {
+                if matches!(record.status, JobStatus::Queued)
+                    && record.job.repo_name.eq_ignore_ascii_case(&job.repo_name)
+                    && record.job.ref_name == job.ref_name
+                    && record.job.event_type == job.event_type
+                {
+                    superseded_jobs.push(record.job.id.clone());
+                    record.status = JobStatus::Skipped {
+                        reason: format!(
+                            "Superseded in queue by newer commit {} ({})",
+                            sha_short, job.id
+                        ),
+                    };
+                    record.updated_at = now;
+                }
+            }
+
+            // Evict oldest terminal record if at max_history capacity (never evict Queued/Running)
+            if store.len() >= self.max_history {
+                if let Some(pos) = store.iter().rposition(|r| {
+                    !matches!(r.status, JobStatus::Queued | JobStatus::Running { .. })
+                }) {
+                    store.remove(pos);
+                }
+            }
+
             store.push_front(JobRecord {
-                job,
+                job: job.clone(),
                 status: JobStatus::Queued,
                 log_file,
-                updated_at: Utc::now(),
+                updated_at: now,
                 metrics: None,
             });
+
+            // Compute 1-based FIFO queue position among all currently Queued jobs
+            queue_position = store
+                .iter()
+                .filter(|r| matches!(r.status, JobStatus::Queued))
+                .count();
         }
+
         self.persist().await;
+        self.notify.notify_one();
+
+        EnqueueResult {
+            job_id: job.id,
+            queue_position,
+            superseded_jobs,
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn add_job(&self, job: Job, log_file: PathBuf) {
+        let _ = self.enqueue_job(job, log_file).await;
+    }
+
+    /// Atomically claims the oldest `Queued` job in FIFO order and transitions it to `Running`.
+    pub async fn claim_next_queued_job(&self) -> Option<Job> {
+        let claimed = {
+            let mut store = self.inner.write().await;
+            let now = Utc::now();
+            let mut found = None;
+            for record in store.iter_mut().rev() {
+                if matches!(record.status, JobStatus::Queued) {
+                    record.status = JobStatus::Running { started_at: now };
+                    record.updated_at = now;
+                    found = Some(record.job.clone());
+                    break;
+                }
+            }
+            found
+        };
+
+        if claimed.is_some() {
+            self.persist().await;
+        }
+        claimed
+    }
+
+    pub async fn wait_for_job(&self) {
+        self.notify.notified().await;
+    }
+
+    pub async fn queue_snapshot(&self) -> QueueSnapshot {
+        let store = self.inner.read().await;
+        let now = Utc::now();
+
+        let mut stats = QueueStats {
+            total_jobs: store.len(),
+            ..Default::default()
+        };
+
+        let mut active_job: Option<QueueItemView> = None;
+        let mut queued_records: Vec<JobRecord> = Vec::new();
+
+        for record in store.iter() {
+            match &record.status {
+                JobStatus::Running { started_at } => {
+                    stats.running_jobs += 1;
+                    let elapsed = (now - *started_at).num_seconds().max(0) as u64;
+                    let wait = (*started_at - record.job.queued_at).num_seconds().max(0) as u64;
+                    if active_job.is_none() {
+                        active_job = Some(QueueItemView {
+                            position: 0,
+                            wait_secs: wait,
+                            elapsed_secs: Some(elapsed),
+                            record: record.clone(),
+                        });
+                    }
+                }
+                JobStatus::Queued => {
+                    stats.queued_jobs += 1;
+                    queued_records.push(record.clone());
+                }
+                JobStatus::Completed { exit_code: 0, .. } => {
+                    stats.completed_jobs += 1;
+                }
+                JobStatus::Completed { .. } | JobStatus::Failed { .. } => {
+                    stats.failed_jobs += 1;
+                }
+                JobStatus::Skipped { reason } => {
+                    stats.skipped_jobs += 1;
+                    if reason.contains("Superseded in queue") {
+                        stats.superseded_jobs += 1;
+                    }
+                }
+            }
+        }
+
+        // Order queued jobs in FIFO execution order (oldest first = position 1)
+        queued_records.reverse();
+        let queued_jobs: Vec<QueueItemView> = queued_records
+            .into_iter()
+            .enumerate()
+            .map(|(idx, rec)| {
+                let wait = (now - rec.job.queued_at).num_seconds().max(0) as u64;
+                QueueItemView {
+                    position: idx + 1,
+                    wait_secs: wait,
+                    elapsed_secs: None,
+                    record: rec,
+                }
+            })
+            .collect();
+
+        let status = if active_job.is_some() || !queued_jobs.is_empty() {
+            "busy".to_string()
+        } else {
+            "idle".to_string()
+        };
+
+        let recent_jobs = store.iter().take(50).cloned().collect();
+
+        QueueSnapshot {
+            status,
+            concurrency: 1,
+            queue_depth: queued_jobs.len(),
+            active_job,
+            queued_jobs,
+            stats,
+            recent_jobs,
+        }
+    }
+
+    pub async fn job_queue_position(&self, job_id: &str) -> Option<usize> {
+        let store = self.inner.read().await;
+        let mut pos = 0usize;
+        for record in store.iter().rev() {
+            if matches!(record.status, JobStatus::Queued) {
+                pos += 1;
+                if record.job.id == job_id {
+                    return Some(pos);
+                }
+            }
+        }
+        None
     }
 
     pub async fn update_metrics(&self, job_id: &str, metrics: JobMetrics) {
@@ -431,5 +671,99 @@ mod tests {
             .await;
         assert!(path_sub.is_some());
         assert_eq!(path_sub.unwrap().metrics.unwrap().quality_score, 95);
+    }
+
+    #[tokio::test]
+    async fn test_coalescing_fifo_queue_and_snapshot() {
+        let store = JobStore::new(20, None);
+
+        // 1. Enqueue job 1 for ActionRunner-rs and claim it so it is Running
+        let job1 = Job {
+            id: "job-100-aaaa1111".to_string(),
+            event_type: "push".to_string(),
+            repo_name: "LMA1980/ActionRunner-rs".to_string(),
+            clone_url: "https://github.com/LMA1980/ActionRunner-rs.git".to_string(),
+            commit_sha: "aaaa111100000000".to_string(),
+            ref_name: "refs/heads/main".to_string(),
+            sender: "LMA1980".to_string(),
+            queued_at: Utc::now(),
+        };
+        let res1 = store
+            .enqueue_job(job1.clone(), PathBuf::from("logs/job1.log"))
+            .await;
+        assert_eq!(res1.queue_position, 1);
+        assert!(res1.superseded_jobs.is_empty());
+
+        let claimed1 = store.claim_next_queued_job().await;
+        assert!(claimed1.is_some());
+        assert_eq!(claimed1.unwrap().id, "job-100-aaaa1111");
+
+        // 2. While job 1 is running, enqueue two pushes for model-runner main and one for k3-core
+        let job2_old = Job {
+            id: "job-101-bbbb2222".to_string(),
+            event_type: "push".to_string(),
+            repo_name: "LMA1980/model-runner".to_string(),
+            clone_url: "https://github.com/LMA1980/model-runner.git".to_string(),
+            commit_sha: "bbbb222200000000".to_string(),
+            ref_name: "refs/heads/main".to_string(),
+            sender: "LMA1980".to_string(),
+            queued_at: Utc::now(),
+        };
+        let res2 = store
+            .enqueue_job(job2_old.clone(), PathBuf::from("logs/job2.log"))
+            .await;
+        assert_eq!(res2.queue_position, 1);
+        assert!(res2.superseded_jobs.is_empty());
+
+        let job3_other = Job {
+            id: "job-102-cccc3333".to_string(),
+            event_type: "push".to_string(),
+            repo_name: "LMA1980/k3-core".to_string(),
+            clone_url: "https://github.com/LMA1980/k3-core.git".to_string(),
+            commit_sha: "cccc333300000000".to_string(),
+            ref_name: "refs/heads/main".to_string(),
+            sender: "LMA1980".to_string(),
+            queued_at: Utc::now(),
+        };
+        let res3 = store
+            .enqueue_job(job3_other.clone(), PathBuf::from("logs/job3.log"))
+            .await;
+        assert_eq!(res3.queue_position, 2);
+
+        // Newer push for model-runner main arrives while job2_old is still Queued -> coalesces job2_old!
+        let job4_new = Job {
+            id: "job-103-dddd4444".to_string(),
+            event_type: "push".to_string(),
+            repo_name: "LMA1980/model-runner".to_string(),
+            clone_url: "https://github.com/LMA1980/model-runner.git".to_string(),
+            commit_sha: "dddd444400000000".to_string(),
+            ref_name: "refs/heads/main".to_string(),
+            sender: "LMA1980".to_string(),
+            queued_at: Utc::now(),
+        };
+        let res4 = store
+            .enqueue_job(job4_new.clone(), PathBuf::from("logs/job4.log"))
+            .await;
+        assert_eq!(res4.superseded_jobs, vec!["job-101-bbbb2222".to_string()]);
+        assert_eq!(res4.queue_position, 2);
+
+        // Verify queue snapshot reflects 1 active job, 2 queued jobs, and 1 superseded job
+        let snap = store.queue_snapshot().await;
+        assert_eq!(snap.status, "busy");
+        assert_eq!(snap.queue_depth, 2);
+        assert_eq!(snap.stats.running_jobs, 1);
+        assert_eq!(snap.stats.queued_jobs, 2);
+        assert_eq!(snap.stats.superseded_jobs, 1);
+        assert_eq!(snap.queued_jobs[0].record.job.id, "job-102-cccc3333");
+        assert_eq!(snap.queued_jobs[0].position, 1);
+        assert_eq!(snap.queued_jobs[1].record.job.id, "job-103-dddd4444");
+        assert_eq!(snap.queued_jobs[1].position, 2);
+
+        // Claim remaining jobs in FIFO order
+        let next1 = store.claim_next_queued_job().await.unwrap();
+        assert_eq!(next1.id, "job-102-cccc3333");
+        let next2 = store.claim_next_queued_job().await.unwrap();
+        assert_eq!(next2.id, "job-103-dddd4444");
+        assert!(store.claim_next_queued_job().await.is_none());
     }
 }

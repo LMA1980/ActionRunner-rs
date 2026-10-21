@@ -366,19 +366,21 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
 
     let status_uppercase = info.status_text.to_uppercase();
 
-    let has_submodules = metrics_opt
-        .map(|m| !m.submodules.is_empty())
-        .unwrap_or(false);
-    let card_height = if has_submodules { 220 } else { 185 };
+    let sub_count = metrics_opt.map(|m| m.submodules.len()).unwrap_or(0);
+    let sub_rows = sub_count.div_ceil(3);
+    let has_submodules = sub_rows > 0;
 
     let submodules_svg = if let Some(m) = metrics_opt {
         if !m.submodules.is_empty() {
             let mut items_svg = String::new();
-            let mut curr_x = 100;
+            let pill_w = 125;
             for (idx, (sub_name, sub)) in m.submodules.iter().enumerate() {
-                if idx >= 3 {
-                    break;
-                }
+                let row_idx = idx / 3;
+                let col_idx = idx % 3;
+                let curr_x = 100 + col_idx * (pill_w + 8);
+                let pill_y = 127 + row_idx * 26;
+                let text_y = pill_y + 14;
+
                 let pill_color = match sub.quality_score {
                     90..=100 => "#2ea44f",
                     80..=89 => "#85e89d",
@@ -390,21 +392,21 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
                     .map(|(_, n)| n)
                     .unwrap_or(sub_name);
                 let score_str = format!("{}% {}", sub.quality_score, sub.letter_grade);
-                let pill_w = 125;
                 items_svg.push_str(&format!(
-                    r###"  <rect x="{x}" y="127" width="{w}" height="20" rx="4" class="tile-bg"/>
-  <text x="{name_x}" y="141" class="value" fill="#58a6ff">{name}</text>
-  <text x="{score_x}" y="141" text-anchor="end" class="value mono" fill="{color}" font-weight="700">{score}</text>
+                    r###"  <rect x="{x}" y="{pill_y}" width="{w}" height="20" rx="4" class="tile-bg"/>
+  <text x="{name_x}" y="{text_y}" class="value" fill="#58a6ff">{name}</text>
+  <text x="{score_x}" y="{text_y}" text-anchor="end" class="value mono" fill="{color}" font-weight="700">{score}</text>
 "###,
                     x = curr_x,
+                    pill_y = pill_y,
                     w = pill_w,
                     name_x = curr_x + 8,
+                    text_y = text_y,
                     name = xml_escape(display_name),
                     score_x = curr_x + pill_w - 8,
                     color = pill_color,
                     score = xml_escape(&score_str),
                 ));
-                curr_x += pill_w + 8;
             }
 
             format!(
@@ -421,11 +423,16 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
         String::new()
     };
 
-    let (div2_y, row3_y, div3_y, footer_y) = if has_submodules {
-        (154, 172, 186, 202)
+    let div2_y = if has_submodules {
+        154 + (sub_rows.saturating_sub(1) * 26)
     } else {
-        (126, 144, 156, 172)
+        126
     };
+    let row3_y = div2_y + 18;
+    let row4_y = row3_y + 18;
+    let div3_y = row4_y + 12;
+    let footer_y = div3_y + 16;
+    let card_height = footer_y + 16;
 
     format!(
         r###"<svg xmlns="http://www.w3.org/2000/svg" width="520" height="{card_height}" viewBox="0 0 520 {card_height}" fill="none">
@@ -502,18 +509,19 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
   <!-- Divider -->
   <line x1="20" y1="{div2_y}" x2="500" y2="{div2_y}" stroke="#21262d" stroke-width="1"/>
 
-  <!-- Row 3: Commit, Trigger, Duration, Timestamp -->
+  <!-- Row 3: Commit &amp; Trigger -->
   <text x="20" y="{row3_y}" class="label">Commit:</text>
-  <text x="65" y="{row3_y}" class="value mono">{commit_short}</text>
+  <text x="72" y="{row3_y}" class="value mono">{commit_short}</text>
 
-  <text x="135" y="{row3_y}" class="label">Trigger:</text>
-  <text x="178" y="{row3_y}" class="value">{trigger_text}</text>
+  <text x="180" y="{row3_y}" class="label">Trigger:</text>
+  <text x="230" y="{row3_y}" class="value">{trigger_text}</text>
 
-  <text x="315" y="{row3_y}" class="label">Duration:</text>
-  <text x="362" y="{row3_y}" class="value mono">{duration_str}</text>
+  <!-- Row 4: Duration &amp; Updated Timestamp -->
+  <text x="20" y="{row4_y}" class="label">Duration:</text>
+  <text x="72" y="{row4_y}" class="value mono">{duration_str}</text>
 
-  <text x="405" y="{row3_y}" class="label">Updated:</text>
-  <text x="450" y="{row3_y}" class="value">{timestamp_str}</text>
+  <text x="180" y="{row4_y}" class="label">Updated:</text>
+  <text x="230" y="{row4_y}" class="value">{timestamp_str}</text>
 
   <!-- Footer Banner: Native RISC-V Hardware Tag -->
   <line x1="20" y1="{div3_y}" x2="500" y2="{div3_y}" stroke="#21262d" stroke-width="1"/>
@@ -541,6 +549,7 @@ pub fn render_card_svg(repo: &str, branch: &str, record: Option<&JobRecord>) -> 
         submodules_svg = submodules_svg,
         div2_y = div2_y,
         row3_y = row3_y,
+        row4_y = row4_y,
         div3_y = div3_y,
         footer_y = footer_y,
         commit_short = xml_escape(&commit_short),
@@ -775,5 +784,64 @@ mod tests {
 
         // Verify there is no bare '&' followed by a space
         assert!(!svg.contains("& "));
+    }
+
+    #[test]
+    fn test_render_card_svg_metadata_lines_and_multi_row_submodules() {
+        let mut submodules = std::collections::BTreeMap::new();
+        for name in ["k3-core", "k3-engine", "k3-manager", "k3-edge"] {
+            submodules.insert(
+                name.to_string(),
+                crate::job::SubmoduleMetrics {
+                    name: name.to_string(),
+                    path: format!("code/{}", name),
+                    quality_score: 96,
+                    letter_grade: "A+".to_string(),
+                    tests_passed: 8,
+                    tests_total: 8,
+                    coverage_pct: Some(91.0),
+                    benchmark_summary: None,
+                    clippy_warnings: 0,
+                },
+            );
+        }
+
+        let record = JobRecord {
+            job: sample_job("refs/heads/main"),
+            status: JobStatus::Completed {
+                duration_secs: 42,
+                exit_code: 0,
+            },
+            log_file: PathBuf::from("logs/sample.log"),
+            updated_at: Utc::now(),
+            metrics: Some(JobMetrics {
+                quality_score: 96,
+                letter_grade: "A+".to_string(),
+                coverage_pct: Some(91.0),
+                benchmark_summary: None,
+                tests_passed: 32,
+                tests_total: 32,
+                advisories_count: 0,
+                clippy_warnings: 0,
+                submodules,
+            }),
+        };
+
+        let svg = render_card_svg("LMA1980/model-runner", "main", Some(&record));
+
+        // All 4 submodules should be rendered across 2 rows (y="127" and y="153")
+        assert!(svg.contains("k3-core"));
+        assert!(svg.contains("k3-engine"));
+        assert!(svg.contains("k3-manager"));
+        assert!(svg.contains("k3-edge"));
+        assert!(svg.contains(r#"y="127""#));
+        assert!(svg.contains(r#"y="153""#));
+
+        // Commit & Trigger on row3_y (198), Duration & Updated on row4_y (216) below it
+        assert!(svg.contains(r#"<text x="20" y="198" class="label">Commit:</text>"#));
+        assert!(svg.contains(r#"<text x="180" y="198" class="label">Trigger:</text>"#));
+        assert!(svg.contains(r#"<text x="20" y="216" class="label">Duration:</text>"#));
+        assert!(svg.contains(r#"<text x="180" y="216" class="label">Updated:</text>"#));
+        assert!(svg.contains(r#"<text x="230" y="216" class="value">"#));
     }
 }

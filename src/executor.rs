@@ -25,11 +25,28 @@ impl Executor {
     }
 
     pub async fn run_worker(self: Arc<Self>, mut rx: mpsc::Receiver<Job>) {
-        info!("ActionRunner executor worker started (concurrency = 1)");
+        info!("ActionRunner executor worker started (concurrency = 1, coalescing FIFO queue)");
 
-        while let Some(job) = rx.recv().await {
-            info!(job_id = %job.id, event = %job.event_type, repo = %job.repo_name, commit = %job.commit_sha, "Starting job execution");
-            self.execute_job(job).await;
+        loop {
+            while let Some(job) = self.job_store.claim_next_queued_job().await {
+                info!(
+                    job_id = %job.id,
+                    event = %job.event_type,
+                    repo = %job.repo_name,
+                    commit = %job.commit_sha,
+                    "Starting job execution"
+                );
+                self.execute_job(job).await;
+            }
+
+            tokio::select! {
+                _ = self.job_store.wait_for_job() => {}
+                msg = rx.recv() => {
+                    if msg.is_none() {
+                        break;
+                    }
+                }
+            }
         }
 
         info!("ActionRunner executor worker terminated");
@@ -1092,6 +1109,12 @@ mod tests {
             .arg("ci@test.com")
             .current_dir(&work_dir)
             .status();
+        let _ = StdCommand::new("git")
+            .arg("config")
+            .arg("commit.gpgsign")
+            .arg("false")
+            .current_dir(&work_dir)
+            .status();
 
         std::fs::write(work_dir.join("file.txt"), "first commit\n").unwrap();
         assert!(StdCommand::new("git")
@@ -1302,6 +1325,12 @@ mod tests {
             .arg("config")
             .arg("user.email")
             .arg("ci@test.com")
+            .current_dir(&work_dir)
+            .status();
+        let _ = StdCommand::new("git")
+            .arg("config")
+            .arg("commit.gpgsign")
+            .arg("false")
             .current_dir(&work_dir)
             .status();
 

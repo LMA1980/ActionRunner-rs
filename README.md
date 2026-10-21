@@ -24,10 +24,11 @@ Lightweight, high-performance GitHub Webhook & CI execution sidecar daemon writt
 ## Key Capabilities
 
 - **Native RISC-V CI Execution**: Runs directly on bare-metal RISC-V cores with zero virtualization overhead.
+- **Coalescing FIFO Webhook Queue**: Serializes builds (`concurrency = 1`) for resource-constrained K3 hosts, persists queue state to `jobs_index.json`, and automatically supersedes older queued commits when newer pushes arrive for the same `(repository, ref, event)`.
 - **HMAC-SHA256 Signature Verification**: Validates GitHub's `X-Hub-Signature-256` payload signatures in constant time.
 - **Automated Local Workspace Sync**: Automatically updates branches, clones submodules (`git submodule update --init --recursive --force`), cleans untracked artifacts, and executes YAML workflows.
 - **Factory Pipeline Quality Scoring**: Evaluates tests pass-ratio, line coverage (`cargo llvm-cov`), security advisories (`cargo audit`), and linter hygiene (`cargo clippy`) to calculate an overall quality score (0–100) and letter grade (`A+` to `F`).
-- **Individual Submodule Scoring & Badges**: Automatically discovers Git submodules from `.gitmodules`, tracks individual test counts, coverage, benchmarks, and hygiene, and generates dedicated badges and scorecard pill rows.
+- **Individual Submodule Scoring & Badges**: Automatically discovers Git submodules from `.gitmodules`, tracks individual test counts, coverage, benchmarks, and hygiene, and generates dedicated badges and multi-row scorecard pill rows.
 - **High-DPI SVG Badges & Scorecards**: Dynamic badges (`score.svg`, `status.svg`, `coverage.svg`, `benchmark.svg`) and rich multi-metric cards (`card.svg`) rendered on-the-fly.
 - **Ultra-Low Resource Footprint**: Consumes < 15 MB RAM under idle operation.
 
@@ -48,12 +49,13 @@ Workflows are defined in YAML and triggered based on GitHub webhook events:
 
 ## Endpoints Reference
 
-### 1. Ingress & Inspection
-- `GET /health` — Service healthcheck and architecture details (`riscv64`).
-- `POST /webhook` — GitHub webhook ingress endpoint.
-- `GET /jobs` — List queued and completed jobs with metrics.
-- `GET /jobs/{id}` — Query specific job status, duration, and metrics.
-- `GET /jobs/{id}/log` — View full stdout/stderr build and test logs.
+### 1. Ingress, Queue & Inspection API
+- `GET /health` (`/api/health`) — Service healthcheck, queue status (`idle` / `busy`), queue depth, and architecture details (`riscv64`).
+- `POST /webhook` — GitHub webhook ingress endpoint (returns `202 Accepted` with `job_id`, `queue_position`, and `superseded_jobs`).
+- `GET /queue` (`/api/queue`) — Live queue monitor snapshot (`active_job`, `queued_jobs` with FIFO position & wait time, `stats`, and `recent_jobs`).
+- `GET /jobs` (`/api/jobs`) — List queued and historical jobs with metrics (supports `?repo=`, `?status=`, and `?limit=` filters).
+- `GET /jobs/{id}` (`/api/jobs/{id}`) — Query specific job status, queue position, elapsed/duration time, and metrics (including submodules).
+- `GET /jobs/{id}/log` (`/api/jobs/{id}/log`) — View full stdout/stderr build and test logs.
 
 ### 2. Badges & Factory Scorecards
 - `GET /badges/{owner}/{repo}/status.svg` — Build status badge (`k3-ci | passing`).

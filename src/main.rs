@@ -6,12 +6,14 @@ mod webhook;
 mod workflow;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
+use chrono::Utc;
+use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -19,7 +21,7 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::executor::Executor;
-use crate::job::JobStore;
+use crate::job::{JobStatus, JobStore};
 use crate::webhook::{handle_webhook, AppState};
 
 #[tokio::main]
@@ -58,10 +60,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/health", get(health_check))
+        .route("/api/health", get(health_check))
         .route("/webhook", post(handle_webhook))
+        .route("/queue", get(get_queue))
+        .route("/api/queue", get(get_queue))
         .route("/jobs", get(list_jobs))
+        .route("/api/jobs", get(list_jobs))
         .route("/jobs/{id}", get(get_job))
+        .route("/api/jobs/{id}", get(get_job))
         .route("/jobs/{id}/log", get(get_job_log))
+        .route("/api/jobs/{id}/log", get(get_job_log))
         // Dynamic Status Badges & Cards
         .route("/badges/{owner}/{repo}/status.svg", get(get_repo_badge))
         .route(
@@ -152,55 +160,214 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn health_check() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ok",
-        "service": "ActionRunner-rs",
-        "arch": "riscv64",
-        "version": env!("CARGO_PKG_VERSION")
-    }))
+fn json_response(status: StatusCode, val: serde_json::Value) -> Response {
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        Json(val),
+    )
+        .into_response()
 }
 
-async fn list_jobs(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let jobs = state.job_store.list_jobs().await;
+async fn health_check(State(state): State<Arc<AppState>>) -> Response {
+    let snap = state.job_store.queue_snapshot().await;
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "status": "ok",
+            "service": "ActionRunner-rs",
+            "arch": "riscv64",
+            "version": env!("CARGO_PKG_VERSION"),
+            "queue_status": snap.status,
+            "queue_depth": snap.queue_depth,
+            "concurrency": snap.concurrency
+        }),
+    )
+}
+
+async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
+    let snap = state.job_store.queue_snapshot().await;
+    json_response(StatusCode::OK, serde_json::to_value(snap).unwrap())
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct JobsQuery {
+    repo: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn list_jobs(State(state): State<Arc<AppState>>, Query(query): Query<JobsQuery>) -> Response {
+    let snap = state.job_store.queue_snapshot().await;
+    let all_jobs = state.job_store.list_jobs().await;
+
+    let mut jobs: Vec<_> = all_jobs
+        .into_iter()
+        .filter(|rec| {
+            if let Some(ref repo_filter) = query.repo {
+                if !repo_filter.is_empty()
+                    && !rec
+                        .job
+                        .repo_name
+                        .to_ascii_lowercase()
+                        .contains(&repo_filter.to_ascii_lowercase())
+                {
+                    return false;
+                }
+            }
+            if let Some(ref status_filter) = query.status {
+                let s = status_filter.to_ascii_lowercase();
+                if !s.is_empty() && s != "all" {
+                    let matches_status = match &rec.status {
+                        JobStatus::Queued => s == "queued",
+                        JobStatus::Running { .. } => s == "running",
+                        JobStatus::Completed { exit_code: 0, .. } => {
+                            s == "completed" || s == "passing" || s == "passed"
+                        }
+                        JobStatus::Completed { .. } | JobStatus::Failed { .. } => {
+                            s == "failed" || s == "failing"
+                        }
+                        JobStatus::Skipped { .. } => s == "skipped" || s == "superseded",
+                    };
+                    if !matches_status {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+        .collect();
+
+    if let Some(limit) = query.limit {
+        jobs.truncate(limit);
+    }
+
     let job_ids: Vec<String> = jobs.iter().map(|j| j.job.id.clone()).collect();
-    Json(serde_json::json!({
-        "job_ids": job_ids,
-        "total": jobs.len(),
-        "jobs": jobs
-    }))
+    let active_job_id = snap.active_job.as_ref().map(|a| a.record.job.id.clone());
+
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "job_ids": job_ids,
+            "total": jobs.len(),
+            "queue_depth": snap.queue_depth,
+            "active_job_id": active_job_id,
+            "stats": snap.stats,
+            "jobs": jobs
+        }),
+    )
 }
 
-async fn get_job(
-    State(state): State<Arc<AppState>>,
-    Path(job_id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+async fn get_job(State(state): State<Arc<AppState>>, Path(job_id): Path<String>) -> Response {
     match state.job_store.get_job(&job_id).await {
-        Some(record) => Ok(Json(serde_json::to_value(record).unwrap())),
-        None => Err((
+        Some(record) => {
+            let mut val = serde_json::to_value(&record).unwrap();
+            if let Some(obj) = val.as_object_mut() {
+                if let Some(pos) = state.job_store.job_queue_position(&job_id).await {
+                    obj.insert("queue_position".to_string(), serde_json::json!(pos));
+                }
+                if let JobStatus::Running { started_at } = record.status {
+                    let elapsed = (Utc::now() - started_at).num_seconds().max(0) as u64;
+                    obj.insert("elapsed_secs".to_string(), serde_json::json!(elapsed));
+                }
+            }
+            json_response(StatusCode::OK, val)
+        }
+        None => json_response(
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "Job not found", "job_id": job_id })),
-        )),
+            serde_json::json!({ "error": "Job not found", "job_id": job_id }),
+        ),
     }
 }
 
-async fn get_job_log(
-    State(state): State<Arc<AppState>>,
-    Path(job_id): Path<String>,
-) -> Result<String, (StatusCode, &'static str)> {
-    let record = state
-        .job_store
-        .get_job(&job_id)
-        .await
-        .ok_or((StatusCode::NOT_FOUND, "Job not found"))?;
+async fn get_job_log(State(state): State<Arc<AppState>>, Path(job_id): Path<String>) -> Response {
+    let Some(record) = state.job_store.get_job(&job_id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            [
+                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            "Job not found".to_string(),
+        )
+            .into_response();
+    };
 
     let full_path = state.config.workspace_dir.join(&record.log_file);
-    tokio::fs::read_to_string(&full_path).await.map_err(|_| {
-        (
-            StatusCode::NOT_FOUND,
-            "Log file not found or not yet generated",
+    match tokio::fs::read_to_string(&full_path).await {
+        Ok(content) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            content,
         )
-    })
+            .into_response(),
+        Err(_) => match &record.status {
+            JobStatus::Queued => {
+                let pos = state
+                    .job_store
+                    .job_queue_position(&job_id)
+                    .await
+                    .unwrap_or(1);
+                let msg = format!(
+                    "[ActionRunner-rs] Job '{}' is currently QUEUED (position #{}) waiting for an available worker.\nRepository: {}\nRef:        {}\nCommit SHA: {}\nQueued At:  {}\n",
+                    record.job.id,
+                    pos,
+                    record.job.repo_name,
+                    record.job.ref_name,
+                    record.job.commit_sha,
+                    record.job.queued_at.to_rfc3339()
+                );
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                        (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+                        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                    ],
+                    msg,
+                )
+                    .into_response()
+            }
+            JobStatus::Skipped { reason } => {
+                let msg = format!(
+                    "[ActionRunner-rs] Job '{}' was SKIPPED before execution.\nReason:     {}\nRepository: {}\nRef:        {}\nCommit SHA: {}\nQueued At:  {}\n",
+                    record.job.id,
+                    reason,
+                    record.job.repo_name,
+                    record.job.ref_name,
+                    record.job.commit_sha,
+                    record.job.queued_at.to_rfc3339()
+                );
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                        (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+                        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                    ],
+                    msg,
+                )
+                    .into_response()
+            }
+            _ => (
+                StatusCode::NOT_FOUND,
+                [
+                    (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                    (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                ],
+                "Log file not found or not yet generated".to_string(),
+            )
+                .into_response(),
+        },
+    }
 }
 
 async fn get_repo_badge(
