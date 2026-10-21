@@ -62,6 +62,15 @@ visudo -c -f /etc/sudoers.d/action-runner-diag
 echo "Installing /etc/systemd/system/action-runner.service"
 cp "${SCRIPT_DIR}/action-runner.service" /etc/systemd/system/action-runner.service
 chmod 644 /etc/systemd/system/action-runner.service
+
+# 7. Optional: Install Nginx Hardening Drop-in (cgroup v2 & namespace sandboxing)
+if [ -d "/etc/nginx" ] || command -v nginx >/dev/null 2>&1; then
+    echo "Installing Nginx hardening drop-in in /etc/systemd/system/nginx.service.d/override.conf"
+    mkdir -p /etc/systemd/system/nginx.service.d
+    cp "${SCRIPT_DIR}/nginx-override.conf" /etc/systemd/system/nginx.service.d/override.conf
+    chmod 644 /etc/systemd/system/nginx.service.d/override.conf
+fi
+
 systemctl daemon-reload
 
 echo "================================================================================"
