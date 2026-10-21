@@ -320,7 +320,7 @@ impl Executor {
             cmd.current_dir(&step_dir);
 
             // Sanitized standard environment defaulting to standard system toolchain
-            let default_path = "/home/action-runner/.cargo/bin:/home/lma1980/.cargo/bin:/usr/local/bin:/usr/bin:/bin";
+            let default_path = "/var/lib/action-runner/.cargo/bin:/home/action-runner/.cargo/bin:/home/lma1980/.cargo/bin:/usr/local/bin:/usr/bin:/bin";
             let cargo_home = self.config.workspace_dir.join(".cargo");
             cmd.env("PATH", default_path);
             cmd.env("CARGO_HOME", cargo_home);
@@ -547,7 +547,8 @@ impl Executor {
             );
 
             let mut clone_cmd = Command::new("git");
-            let git_url = if (Path::new("/home/action-runner/.ssh/id_k3_ci").exists()
+            let git_url = if (Path::new("/var/lib/action-runner/.ssh/id_k3_ci").exists()
+                || Path::new("/home/action-runner/.ssh/id_k3_ci").exists()
                 || Path::new("/home/lma1980/.ssh/id_k3_ci").exists())
                 && (job.clone_url.contains("github.com") || job.clone_url.starts_with("git@"))
             {

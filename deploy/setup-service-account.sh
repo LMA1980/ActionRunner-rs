@@ -26,6 +26,11 @@ mkdir -p /var/lib/action-runner/workspace/.cargo
 mkdir -p /var/lib/action-runner/web/dist
 mkdir -p /etc/action-runner
 
+if [ -d "/var/www/action-runner-web" ] && [ ! -f "/var/lib/action-runner/web/dist/index.html" ]; then
+    echo "Syncing initial web assets from /var/www/action-runner-web to /var/lib/action-runner/web/dist"
+    cp -r /var/www/action-runner-web/* /var/lib/action-runner/web/dist/ 2>/dev/null || true
+fi
+
 chown -R action-runner:action-runner /var/lib/action-runner
 chmod 750 /var/lib/action-runner
 chmod 700 /etc/action-runner
@@ -46,9 +51,18 @@ if [ -f "/home/lma1980/.ssh/id_k3_ci" ] && [ ! -f "/var/lib/action-runner/.ssh/i
     if [ -f "/home/lma1980/.ssh/id_k3_ci.pub" ]; then
         cp /home/lma1980/.ssh/id_k3_ci.pub /var/lib/action-runner/.ssh/id_k3_ci.pub
     fi
+    cat << 'EOF' > /var/lib/action-runner/.ssh/config
+Host github.com
+    HostName github.com
+    User git
+    IdentityFile /var/lib/action-runner/.ssh/id_k3_ci
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+EOF
     chown -R action-runner:action-runner /var/lib/action-runner/.ssh
     chmod 700 /var/lib/action-runner/.ssh
     chmod 600 /var/lib/action-runner/.ssh/id_k3_ci
+    chmod 600 /var/lib/action-runner/.ssh/config
 fi
 
 # 5. Install Sudoers configuration for user lma1980 diagnostics
