@@ -31,6 +31,12 @@ if [ -d "/var/www/action-runner-web" ] && [ ! -f "/var/lib/action-runner/web/dis
     cp -r /var/www/action-runner-web/* /var/lib/action-runner/web/dist/ 2>/dev/null || true
 fi
 
+# Migrate past execution history if present in old workspace
+if [ -d "/home/lma1980/repository/ci-workspace/logs" ] && [ ! -f "/var/lib/action-runner/workspace/logs/jobs_index.json" ]; then
+    echo "Migrating past execution history from /home/lma1980/repository/ci-workspace/logs"
+    cp -a /home/lma1980/repository/ci-workspace/logs/* /var/lib/action-runner/workspace/logs/ 2>/dev/null || true
+fi
+
 chown -R action-runner:action-runner /var/lib/action-runner
 chmod 750 /var/lib/action-runner
 chmod 700 /etc/action-runner
