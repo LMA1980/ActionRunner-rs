@@ -1,0 +1,6 @@
+# /etc/sudoers.d/action-runner-diag
+#
+# Permits user lma1980 to execute commands and shells as service account action-runner
+# for diagnostics, log tailing, and workspace inspection without requiring a password.
+
+lma1980 ALL=(action-runner) NOPASSWD: ALL

@@ -1,0 +1,41 @@
+[Unit]
+Description=ActionRunner-rs CI Execution Daemon
+Documentation=https://github.com/LMA1980/ActionRunner-rs
+After=network.target
+
+[Service]
+Type=simple
+User=action-runner
+Group=action-runner
+WorkingDirectory=/var/lib/action-runner
+Environment=ACTION_RUNNER_BIND=127.0.0.1:8000
+Environment=ACTION_RUNNER_WORKSPACE=/var/lib/action-runner/workspace
+Environment=ACTION_RUNNER_ALLOWED_REPOS=LMA1980/*
+Environment=ACTION_RUNNER_TIMEOUT_SECS=600
+Environment=GITHUB_WEBHOOK_SECRET=/etc/action-runner/github_webhook_secret
+ExecStart=/usr/local/bin/action-runner
+Restart=always
+RestartSec=5
+
+# ==============================================================================
+# Security Hardening & Isolation Directives (Namespaces & CGroup v2)
+# ==============================================================================
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Directory Access Controls
+ReadWritePaths=/var/lib/action-runner
+InaccessiblePaths=/etc/shadow /root
+
+# CGroup v2 Resource Constraints (SpacemiT K3 8x Core Tuning)
+MemoryMax=6G
+CPUQuota=600%
+TasksMax=1024
+
+[Install]
+WantedBy=multi-user.target

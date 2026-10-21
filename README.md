@@ -71,6 +71,26 @@ Workflows are defined in YAML and triggered based on GitHub webhook events:
 
 ---
 
+## Security Model & Sandboxing
+
+`ActionRunner-rs` implements strict multi-layer defense against rogue code execution on public endpoints:
+
+1. **Service Account Isolation**: Runs under a dedicated, unprivileged system account (`action-runner`). User `lma1980` can sudo as `action-runner` for diagnostics (`sudo -u action-runner -i`).
+2. **Anti-RCE Pull Request Guards**:
+   - Webhooks from external repository forks are automatically rejected (`allow_fork_prs = false`).
+   - Pull request authors must hold trusted repository associations (`OWNER`, `MEMBER`, or `COLLABORATOR`).
+3. **CGroup v2 & Namespace Sandboxing**:
+   - Process sandboxing via `systemd-run` or systemd service security directives (`NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=yes`).
+   - CGroup v2 resource envelopes enforce memory ceiling (`MemoryMax=6G`), CPU quota (`CPUQuota=600%`), and task limits (`TasksMax=1024`).
+4. **Input Sanitization & Injection Defense**:
+   - Strict repository name validation preventing directory traversal.
+   - Hexadecimal-only commit SHA validation and git argument delimiters (`--`).
+   - Blacklist filter for dangerous shell environment variables (`LD_PRELOAD`, `BASH_ENV`, etc.).
+5. **Fail-Closed HMAC Authentication**:
+   - Rejects unauthenticated webhooks on public endpoints; fails closed if secret token is unconfigured.
+
+---
+
 ## Configuration
 
 Environment variables configured in `/etc/systemd/system/action-runner.service`:
@@ -78,10 +98,30 @@ Environment variables configured in `/etc/systemd/system/action-runner.service`:
 | Variable | Default | Purpose |
 |---|---|---|
 | `ACTION_RUNNER_BIND` | `127.0.0.1:8000` | Local listen socket address behind Nginx reverse proxy |
-| `ACTION_RUNNER_WORKSPACE` | `/home/lma1980/repository/ci-workspace` | Base directory for repositories and build logs |
+| `ACTION_RUNNER_WORKSPACE` | `/var/lib/action-runner/workspace` | Base directory for repositories and build logs |
 | `ACTION_RUNNER_ALLOWED_REPOS` | `LMA1980/*` | Whitelisted repositories permitted to execute CI steps |
-| `GITHUB_WEBHOOK_SECRET` | `/home/lma1980/.github_webhook_secret` | HMAC-SHA256 webhook secret token |
-| `ACTION_RUNNER_TIMEOUT_SECS` | `1800` | Maximum job execution timeout (seconds) |
+| `ACTION_RUNNER_ALLOWED_ACTORS` | `*` (all) | Whitelisted GitHub logins allowed to trigger CI builds |
+| `ACTION_RUNNER_ALLOW_FORK_PRS` | `false` | Disallow untrusted fork PRs from executing on bare-metal host |
+| `ACTION_RUNNER_ALLOWED_PR_AUTHORS` | `OWNER,MEMBER,COLLABORATOR` | Permitted author associations for automated PR builds |
+| `ACTION_RUNNER_ISOLATION` | `none` (or `systemd-run`) | Process sandboxing mode (`none`, `systemd-run`, `bubblewrap`) |
+| `ACTION_RUNNER_LOG_API_KEY` | None | Optional secret token required for log viewing (`X-Api-Key` or Bearer) |
+| `GITHUB_WEBHOOK_SECRET` | `/etc/action-runner/github_webhook_secret` | HMAC-SHA256 webhook secret token |
+| `ACTION_RUNNER_TIMEOUT_SECS` | `600` | Maximum job execution timeout (seconds) |
+
+---
+
+## Service Account Provisioning
+
+Automated provisioning script in [`deploy/setup-service-account.sh`](deploy/setup-service-account.sh):
+```bash
+sudo ./deploy/setup-service-account.sh
+```
+
+Diagnostics for `lma1980`:
+```bash
+# Switch to action-runner service account for log or workspace inspection:
+sudo -u action-runner -i
+```
 
 ---
 

@@ -71,6 +71,25 @@ impl Executor {
             .join(&job.repo_name)
             .join(format!("{}.log", job.id));
 
+        // Security boundary check: ensure repo_workspace and log_file_path do not escape workspace
+        if !repo_workspace.starts_with(&self.config.workspace_dir)
+            || !log_file_path.starts_with(&self.config.workspace_dir)
+        {
+            error!(
+                repo = %job.repo_name,
+                "Security violation: path traversal outside workspace directory detected"
+            );
+            self.job_store
+                .update_status(
+                    &job.id,
+                    JobStatus::Failed {
+                        error: "Security violation: path traversal outside workspace directory detected".to_string(),
+                    },
+                )
+                .await;
+            return;
+        }
+
         if let Some(parent) = log_file_path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
@@ -212,12 +231,92 @@ impl Executor {
                 .map(|d| repo_workspace.join(d))
                 .unwrap_or_else(|| repo_workspace.clone());
 
-            let mut cmd = Command::new("bash");
-            cmd.arg("-e").arg("-c").arg(&step.run);
+            const FORBIDDEN_ENV_VARS: &[&str] = &[
+                "LD_PRELOAD",
+                "LD_LIBRARY_PATH",
+                "BASH_ENV",
+                "ENV",
+                "SHELLOPTS",
+                "BASHOPTS",
+                "CDPATH",
+                "GLOBIGNORE",
+                "IFS",
+            ];
+
+            let mut cmd = match self.config.isolation_mode {
+                crate::config::IsolationMode::SystemdRun => {
+                    let mut scmd = Command::new("systemd-run");
+                    let clean_job_id = job
+                        .id
+                        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_");
+                    let unit_name = format!("k3ci-{}-{}", clean_job_id, idx + 1);
+                    scmd.arg("--pipe")
+                        .arg("--wait")
+                        .arg("--collect")
+                        .arg(format!("--unit={}", unit_name))
+                        .arg("--property=PrivateTmp=yes")
+                        .arg("--property=ProtectSystem=strict")
+                        .arg("--property=ProtectHome=read-only")
+                        .arg(format!(
+                            "--property=ReadWritePaths={}",
+                            repo_workspace.display()
+                        ))
+                        .arg(format!(
+                            "--property=ReadWritePaths={}",
+                            self.config.workspace_dir.display()
+                        ))
+                        .arg("--property=MemoryMax=6G")
+                        .arg("--property=CPUQuota=600%")
+                        .arg("--property=TasksMax=1024")
+                        .arg("--")
+                        .arg("bash")
+                        .arg("-e")
+                        .arg("-c")
+                        .arg(&step.run);
+                    scmd
+                }
+                crate::config::IsolationMode::Bubblewrap => {
+                    let mut bcmd = Command::new("bwrap");
+                    bcmd.arg("--ro-bind")
+                        .arg("/usr")
+                        .arg("/usr")
+                        .arg("--ro-bind")
+                        .arg("/bin")
+                        .arg("/bin")
+                        .arg("--ro-bind")
+                        .arg("/lib")
+                        .arg("/lib")
+                        .arg("--proc")
+                        .arg("/proc")
+                        .arg("--dev")
+                        .arg("/dev")
+                        .arg("--tmpfs")
+                        .arg("/tmp")
+                        .arg("--bind")
+                        .arg(&repo_workspace)
+                        .arg(&repo_workspace)
+                        .arg("--bind")
+                        .arg(&self.config.workspace_dir)
+                        .arg(&self.config.workspace_dir)
+                        .arg("--unshare-all")
+                        .arg("--new-session")
+                        .arg("--")
+                        .arg("bash")
+                        .arg("-e")
+                        .arg("-c")
+                        .arg(&step.run);
+                    bcmd
+                }
+                crate::config::IsolationMode::None => {
+                    let mut bcmd = Command::new("bash");
+                    bcmd.arg("-e").arg("-c").arg(&step.run);
+                    bcmd
+                }
+            };
             cmd.current_dir(&step_dir);
 
             // Sanitized standard environment defaulting to standard system toolchain
-            let default_path = "/home/lma1980/.cargo/bin:/usr/local/bin:/usr/bin:/bin";
+            let default_path = "/home/action-runner/.cargo/bin:/home/lma1980/.cargo/bin:/usr/local/bin:/usr/bin:/bin";
             let cargo_home = self.config.workspace_dir.join(".cargo");
             cmd.env("PATH", default_path);
             cmd.env("CARGO_HOME", cargo_home);
@@ -240,19 +339,29 @@ impl Executor {
                 cmd.env("GITHUB_REF_NAME", &job.ref_name);
             }
 
-            // Injected workflow-level env (with $PATH expansion support)
+            // Injected workflow-level env (filtering forbidden vars with $PATH expansion support)
             if let Some(ref env_map) = workflow.env {
                 for (k, v) in env_map {
-                    let val = v.replace("$PATH", default_path);
-                    cmd.env(k, val);
+                    if !FORBIDDEN_ENV_VARS
+                        .iter()
+                        .any(|bad| bad.eq_ignore_ascii_case(k))
+                    {
+                        let val = v.replace("$PATH", default_path);
+                        cmd.env(k, val);
+                    }
                 }
             }
 
-            // Injected step-level env (with $PATH expansion support)
+            // Injected step-level env (filtering forbidden vars with $PATH expansion support)
             if let Some(ref env_map) = step.env {
                 for (k, v) in env_map {
-                    let val = v.replace("$PATH", default_path);
-                    cmd.env(k, val);
+                    if !FORBIDDEN_ENV_VARS
+                        .iter()
+                        .any(|bad| bad.eq_ignore_ascii_case(k))
+                    {
+                        let val = v.replace("$PATH", default_path);
+                        cmd.env(k, val);
+                    }
                 }
             }
 
@@ -434,7 +543,8 @@ impl Executor {
             );
 
             let mut clone_cmd = Command::new("git");
-            let git_url = if Path::new("/home/lma1980/.ssh/id_k3_ci").exists()
+            let git_url = if (Path::new("/home/action-runner/.ssh/id_k3_ci").exists()
+                || Path::new("/home/lma1980/.ssh/id_k3_ci").exists())
                 && (job.clone_url.contains("github.com") || job.clone_url.starts_with("git@"))
             {
                 format!("git@github.com:{}.git", job.repo_name)
@@ -483,6 +593,9 @@ impl Executor {
 
         if job.ref_name.starts_with("refs/heads/") {
             let branch = job.ref_name.trim_start_matches("refs/heads/");
+            if branch.starts_with('-') {
+                return Err("Invalid branch name starts with hyphen".to_string());
+            }
             let _ = writeln!(
                 log,
                 "[ActionRunner-rs] Checking out and updating branch '{}' at commit {}",
@@ -529,7 +642,11 @@ impl Executor {
                 job.ref_name, job.commit_sha
             );
             let mut checkout_cmd = Command::new("git");
-            checkout_cmd.arg("checkout").arg("-f").arg(&job.commit_sha);
+            checkout_cmd
+                .arg("checkout")
+                .arg("-f")
+                .arg("--detach")
+                .arg(&job.commit_sha);
             checkout_cmd.current_dir(repo_dir);
 
             checkout_cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
@@ -1183,9 +1300,15 @@ mod tests {
         let config = Config {
             bind_addr: "127.0.0.1:0".to_string(),
             webhook_secret: None,
+            allow_insecure_no_secret: true,
             workspace_dir: runner_workspace.clone(),
             allowed_repositories: vec!["LMA1980/*".to_string()],
+            allowed_actors: vec![],
+            allow_fork_prs: false,
+            allowed_pr_author_associations: vec!["OWNER".to_string()],
             job_timeout_seconds: 60,
+            log_api_key: None,
+            isolation_mode: crate::config::IsolationMode::None,
         };
         let job_store = JobStore::new(10, None);
         let executor = Executor::new(config, job_store);
@@ -1372,9 +1495,15 @@ mod tests {
         let config = Config {
             bind_addr: "127.0.0.1:0".to_string(),
             webhook_secret: None,
+            allow_insecure_no_secret: true,
             workspace_dir: runner_workspace.clone(),
             allowed_repositories: vec!["LMA1980/*".to_string()],
+            allowed_actors: vec![],
+            allow_fork_prs: false,
+            allowed_pr_author_associations: vec!["OWNER".to_string()],
             job_timeout_seconds: 60,
+            log_api_key: None,
+            isolation_mode: crate::config::IsolationMode::None,
         };
         let job_store = JobStore::new(10, None);
         let executor = Executor::new(config, job_store);
@@ -1457,9 +1586,15 @@ TOTAL                             30                 2    93.33%           7    
         let config = Config {
             bind_addr: "127.0.0.1:0".to_string(),
             webhook_secret: None,
+            allow_insecure_no_secret: true,
             workspace_dir: temp_dir.clone(),
             allowed_repositories: vec!["*".to_string()],
+            allowed_actors: vec![],
+            allow_fork_prs: false,
+            allowed_pr_author_associations: vec!["OWNER".to_string()],
             job_timeout_seconds: 60,
+            log_api_key: None,
+            isolation_mode: crate::config::IsolationMode::None,
         };
         let job_store = JobStore::new(10, None);
         let executor = Executor::new(config, job_store);

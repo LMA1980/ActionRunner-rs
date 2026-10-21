@@ -7,7 +7,7 @@ mod workflow;
 
 use axum::{
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
@@ -17,7 +17,7 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::executor::Executor;
@@ -42,8 +42,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if config.webhook_secret.is_some() {
         info!("GitHub Webhook HMAC signature verification: ACTIVE");
+    } else if config.allow_insecure_no_secret {
+        warn!("GitHub Webhook HMAC signature verification: INSECURE DEV MODE (unverified payloads accepted)");
     } else {
-        info!("GitHub Webhook HMAC signature verification: DISABLED (set GITHUB_WEBHOOK_SECRET to enable)");
+        warn!("GitHub Webhook HMAC signature verification: STRICT (incoming webhooks will be rejected until GITHUB_WEBHOOK_SECRET is set)");
     }
 
     let job_store = JobStore::new(100, Some(&config.workspace_dir));
@@ -284,7 +286,36 @@ async fn get_job(State(state): State<Arc<AppState>>, Path(job_id): Path<String>)
     }
 }
 
-async fn get_job_log(State(state): State<Arc<AppState>>, Path(job_id): Path<String>) -> Response {
+async fn get_job_log(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Response {
+    // If a log API key is configured, authenticate the caller
+    if let Some(ref required_key) = state.config.log_api_key {
+        let auth_hdr = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+        let api_key_hdr = headers.get("x-api-key").and_then(|h| h.to_str().ok());
+
+        let authed =
+            auth_hdr == Some(required_key.as_str()) || api_key_hdr == Some(required_key.as_str());
+        if !authed {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [
+                    (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                    (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                ],
+                serde_json::to_string(&serde_json::json!({
+                    "error": "Unauthorized: valid X-Api-Key or Authorization Bearer token required to access execution logs"
+                })).unwrap(),
+            )
+                .into_response();
+        }
+    }
+
     let Some(record) = state.job_store.get_job(&job_id).await else {
         return (
             StatusCode::NOT_FOUND,
@@ -298,6 +329,17 @@ async fn get_job_log(State(state): State<Arc<AppState>>, Path(job_id): Path<Stri
     };
 
     let full_path = state.config.workspace_dir.join(&record.log_file);
+    if !full_path.starts_with(&state.config.workspace_dir) {
+        return (
+            StatusCode::FORBIDDEN,
+            [
+                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            "Forbidden: log path escapes workspace boundary".to_string(),
+        )
+            .into_response();
+    }
     match tokio::fs::read_to_string(&full_path).await {
         Ok(content) => (
             StatusCode::OK,

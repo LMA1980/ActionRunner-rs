@@ -9,9 +9,9 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
-use crate::config::Config;
+use crate::config::{is_safe_repo_name, Config};
 use crate::job::{Job, JobStore};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -90,8 +90,19 @@ pub async fn handle_webhook(
                 ));
             }
         }
+    } else if state.config.allow_insecure_no_secret {
+        warn!(
+            "Running in INSECURE mode: No webhook secret configured; accepting unverified payload."
+        );
     } else {
-        info!("No webhook secret configured; accepting unverified payload (dev mode).");
+        error!("Webhook received but GITHUB_WEBHOOK_SECRET is not configured. Rejecting request.");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "Server security configuration error: GITHUB_WEBHOOK_SECRET is not configured",
+                "delivery": delivery
+            })),
+        ));
     }
 
     // 2. Parse Payload JSON
@@ -113,7 +124,19 @@ pub async fn handle_webhook(
         .unwrap_or("unknown")
         .to_string();
 
-    // 3. Verify Repository Allowlist
+    // 3. Verify Repository Name Hygiene (Path Traversal Prevention)
+    if !is_safe_repo_name(&repo_name) {
+        warn!(repo = %repo_name, "Repository name contains unsafe characters or path traversal attempt");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Invalid repository name: directory traversal or invalid characters detected",
+                "repository": repo_name
+            })),
+        ));
+    }
+
+    // 4. Verify Repository Allowlist
     if !state.config.is_repo_allowed(&repo_name) {
         warn!(repo = %repo_name, "Repository not allowed by security configuration");
         return Err((
@@ -125,7 +148,26 @@ pub async fn handle_webhook(
         ));
     }
 
-    // 4. Handle Specific GitHub Events
+    // 5. Verify Sender Actor
+    let sender = payload
+        .get("sender")
+        .and_then(|s| s.get("login"))
+        .and_then(|l| l.as_str())
+        .unwrap_or("github")
+        .to_string();
+
+    if !state.config.is_actor_allowed(&sender) {
+        warn!(sender = %sender, repo = %repo_name, "Sender actor not permitted to trigger CI builds");
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "Actor not authorized to trigger CI builds",
+                "sender": sender
+            })),
+        ));
+    }
+
+    // 6. Handle Specific GitHub Events
     if event == "ping" {
         info!(repo = %repo_name, "GitHub ping event received");
         return Ok((
@@ -143,13 +185,6 @@ pub async fn handle_webhook(
         .and_then(|r| r.get("clone_url"))
         .and_then(|c| c.as_str())
         .unwrap_or("")
-        .to_string();
-
-    let sender = payload
-        .get("sender")
-        .and_then(|s| s.get("login"))
-        .and_then(|l| l.as_str())
-        .unwrap_or("github")
         .to_string();
 
     let (commit_sha, ref_name, clone_url, event_type, should_run) = if event == "push" {
@@ -190,8 +225,30 @@ pub async fn handle_webhook(
         }
     } else if event == "pull_request" {
         let action = payload.get("action").and_then(|a| a.as_str()).unwrap_or("");
-
         let pr = payload.get("pull_request");
+
+        // Inspect PR fork origin and author association
+        let head_repo = pr
+            .and_then(|p| p.get("head"))
+            .and_then(|h| h.get("repo"))
+            .and_then(|r| r.get("full_name"))
+            .and_then(|f| f.as_str())
+            .unwrap_or("");
+
+        let base_repo = pr
+            .and_then(|p| p.get("base"))
+            .and_then(|b| b.get("repo"))
+            .and_then(|r| r.get("full_name"))
+            .and_then(|f| f.as_str())
+            .unwrap_or(&repo_name);
+
+        let is_fork = !head_repo.is_empty() && !head_repo.eq_ignore_ascii_case(base_repo);
+
+        let author_association = pr
+            .and_then(|p| p.get("author_association"))
+            .and_then(|a| a.as_str())
+            .unwrap_or("NONE");
+
         let is_merged = pr
             .and_then(|p| p.get("merged"))
             .and_then(|m| m.as_bool())
@@ -230,6 +287,44 @@ pub async fn handle_webhook(
                 true,
             )
         } else if matches!(action, "opened" | "synchronize" | "reopened") {
+            // Anti-RCE Guard 1: Disallow untrusted pull requests from external forks
+            if is_fork && !state.config.allow_fork_prs {
+                info!(
+                    repo = %repo_name,
+                    head_repo = %head_repo,
+                    author = %sender,
+                    "Pull request from external fork ignored for security (untrusted fork execution disabled)"
+                );
+                return Ok((
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ignored",
+                        "reason": "Pull requests from external forks are rejected for security",
+                        "head_repo": head_repo,
+                        "repository": repo_name
+                    })),
+                ));
+            }
+
+            // Anti-RCE Guard 2: Enforce author association (must be OWNER, MEMBER, or COLLABORATOR)
+            if !state.config.is_pr_author_allowed(author_association) {
+                info!(
+                    repo = %repo_name,
+                    author = %sender,
+                    association = %author_association,
+                    "Pull request author not authorized for automatic CI execution"
+                );
+                return Ok((
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ignored",
+                        "reason": "Pull request author association requires manual approval",
+                        "author_association": author_association,
+                        "repository": repo_name
+                    })),
+                ));
+            }
+
             let commit_sha = pr
                 .and_then(|p| p.get("head"))
                 .and_then(|h| h.get("sha"))
@@ -296,6 +391,30 @@ pub async fn handle_webhook(
         }
     };
 
+    // Validate commit SHA format (strictly hexadecimal)
+    if should_run && !commit_sha.is_empty() && !commit_sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        warn!(commit = %commit_sha, "Invalid commit SHA format received");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Invalid commit SHA format: must be hexadecimal",
+                "commit_sha": commit_sha
+            })),
+        ));
+    }
+
+    // Validate ref name does not contain path traversal or unsafe characters
+    if should_run && (ref_name.contains("..") || ref_name.starts_with('-')) {
+        warn!(ref_name = %ref_name, "Invalid ref name received");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Invalid ref name: contains traversal or option flags",
+                "ref": ref_name
+            })),
+        ));
+    }
+
     if !should_run || commit_sha.is_empty() {
         info!(event = %event, repo = %repo_name, "Event accepted with no pending run");
         return Ok((
@@ -360,4 +479,149 @@ pub async fn handle_webhook(
             "ref": ref_name
         })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn make_test_state(
+        secret: Option<&str>,
+        allow_insecure: bool,
+        allow_forks: bool,
+    ) -> (Arc<AppState>, mpsc::Receiver<Job>) {
+        let (tx, rx) = mpsc::channel(16);
+        let config = Config {
+            bind_addr: "127.0.0.1:0".to_string(),
+            webhook_secret: secret.map(|s| s.to_string()),
+            allow_insecure_no_secret: allow_insecure,
+            workspace_dir: PathBuf::from("/tmp"),
+            allowed_repositories: vec!["LMA1980/*".to_string()],
+            allowed_actors: vec![],
+            allow_fork_prs: allow_forks,
+            allowed_pr_author_associations: vec![
+                "OWNER".to_string(),
+                "MEMBER".to_string(),
+                "COLLABORATOR".to_string(),
+            ],
+            job_timeout_seconds: 60,
+            log_api_key: None,
+            isolation_mode: crate::config::IsolationMode::None,
+        };
+        let job_store = JobStore::new(10, None);
+        (
+            Arc::new(AppState {
+                config,
+                job_store,
+                tx,
+            }),
+            rx,
+        )
+    }
+
+    fn compute_sig(secret: &str, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let result = mac.finalize();
+        format!("sha256={}", hex::encode(result.into_bytes()))
+    }
+
+    #[tokio::test]
+    async fn test_webhook_secret_required_in_strict_mode() {
+        let (state, _rx) = make_test_state(None, false, false);
+        let headers = HeaderMap::new();
+        let body = Bytes::from(r#"{"repository":{"full_name":"LMA1980/test"}}"#);
+        let res = handle_webhook(State(state), headers, body).await;
+        assert!(res.is_err());
+        let (status, json) = res.unwrap_err();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(json
+            .to_string()
+            .contains("GITHUB_WEBHOOK_SECRET is not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_webhook_rejects_invalid_hmac() {
+        let (state, _rx) = make_test_state(Some("mysecret"), false, false);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-hub-signature-256", "sha256=badhex".parse().unwrap());
+        let body = Bytes::from(r#"{"repository":{"full_name":"LMA1980/test"}}"#);
+        let res = handle_webhook(State(state), headers, body).await;
+        assert!(res.is_err());
+        let (status, _) = res.unwrap_err();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_rejects_path_traversal_repo() {
+        let secret = "testsecret";
+        let (state, _rx) = make_test_state(Some(secret), false, false);
+        let body_str = r#"{"repository":{"full_name":"LMA1980/../../etc/passwd"}}"#;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-hub-signature-256",
+            compute_sig(secret, body_str.as_bytes()).parse().unwrap(),
+        );
+        let body = Bytes::from(body_str);
+        let res = handle_webhook(State(state), headers, body).await;
+        assert!(res.is_err());
+        let (status, _) = res.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_ignores_fork_pull_request() {
+        let secret = "testsecret";
+        let (state, _rx) = make_test_state(Some(secret), false, false);
+        let body_str = r#"{
+            "repository": {"full_name": "LMA1980/ActionRunner-rs"},
+            "action": "opened",
+            "pull_request": {
+                "head": {"repo": {"full_name": "attacker/ActionRunner-rs"}, "sha": "0123456789abcdef", "ref": "feature"},
+                "base": {"repo": {"full_name": "LMA1980/ActionRunner-rs"}},
+                "author_association": "NONE"
+            }
+        }"#;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request".parse().unwrap());
+        headers.insert(
+            "x-hub-signature-256",
+            compute_sig(secret, body_str.as_bytes()).parse().unwrap(),
+        );
+        let body = Bytes::from(body_str);
+        let res = handle_webhook(State(state), headers, body).await;
+        assert!(res.is_ok());
+        let (status, json) = res.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "ignored");
+        assert!(json["reason"].as_str().unwrap().contains("external forks"));
+    }
+
+    #[tokio::test]
+    async fn test_webhook_accepts_valid_internal_pr() {
+        let secret = "testsecret";
+        let (state, _rx) = make_test_state(Some(secret), false, false);
+        let body_str = r#"{
+            "repository": {"full_name": "LMA1980/ActionRunner-rs"},
+            "action": "opened",
+            "pull_request": {
+                "head": {"repo": {"full_name": "LMA1980/ActionRunner-rs"}, "sha": "0123456789abcdef", "ref": "dev-feature"},
+                "base": {"repo": {"full_name": "LMA1980/ActionRunner-rs"}},
+                "author_association": "OWNER"
+            }
+        }"#;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request".parse().unwrap());
+        headers.insert(
+            "x-hub-signature-256",
+            compute_sig(secret, body_str.as_bytes()).parse().unwrap(),
+        );
+        let body = Bytes::from(body_str);
+        let res = handle_webhook(State(state), headers, body).await;
+        assert!(res.is_ok());
+        let (status, json) = res.unwrap();
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(json["status"], "queued");
+    }
 }
