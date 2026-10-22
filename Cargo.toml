@@ -3,7 +3,7 @@ name = "action-runner"
 version = "0.1.0"
 edition = "2021"
 description = "Lightweight GitHub Webhook & CI runner sidecar for SpacemiT K3 RISC-V platform"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 repository = "https://github.com/LMA1980/ActionRunner-rs"
 
 [dependencies]
