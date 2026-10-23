@@ -13,6 +13,8 @@ Environment=ACTION_RUNNER_WORKSPACE=/var/lib/action-runner/workspace
 Environment=ACTION_RUNNER_ALLOWED_REPOS=LMA1980/*
 Environment=ACTION_RUNNER_TIMEOUT_SECS=600
 Environment=GITHUB_WEBHOOK_SECRET=/etc/action-runner/github_webhook_secret
+Environment=RUSTUP_HOME=/var/lib/action-runner/.rustup
+Environment=CARGO_HOME=/var/lib/action-runner/workspace/.cargo
 ExecStart=/usr/local/bin/action-runner
 Restart=always
 RestartSec=5

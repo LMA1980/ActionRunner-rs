@@ -43,30 +43,52 @@ pub struct Config {
     pub cpu_quota: Option<String>,
 }
 
+/// Resolves the GitHub webhook HMAC secret from either an environment variable
+/// (which may be a file path or a literal secret string) or standard fallback paths.
+pub fn resolve_webhook_secret(env_val: Option<&str>, candidate_paths: &[&Path]) -> Option<String> {
+    if let Some(raw) = env_val {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let path = Path::new(trimmed);
+            if path.is_file() || trimmed.starts_with('/') {
+                if let Ok(contents) = fs::read_to_string(path) {
+                    let secret = contents.trim().to_string();
+                    if !secret.is_empty() {
+                        return Some(secret);
+                    }
+                }
+            } else {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    for p in candidate_paths {
+        if p.exists() {
+            if let Ok(s) = fs::read_to_string(p) {
+                let trimmed = s.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+        }
+    }
+    None
+}
+
 impl Config {
     pub fn load() -> Self {
         let bind_addr =
             env::var("ACTION_RUNNER_BIND").unwrap_or_else(|_| "127.0.0.1:8000".to_string());
 
-        let webhook_secret = env::var("GITHUB_WEBHOOK_SECRET").ok().or_else(|| {
-            let candidate_paths = [
-                Path::new("/etc/action-runner/github_webhook_secret"),
-                Path::new("/home/action-runner/.github_webhook_secret"),
-                Path::new("/var/lib/action-runner/.github_webhook_secret"),
-                Path::new("/home/lma1980/.github_webhook_secret"),
-            ];
-            for p in &candidate_paths {
-                if p.exists() {
-                    if let Ok(s) = fs::read_to_string(p) {
-                        let trimmed = s.trim().to_string();
-                        if !trimmed.is_empty() {
-                            return Some(trimmed);
-                        }
-                    }
-                }
-            }
-            None
-        });
+        let candidate_paths = [
+            Path::new("/etc/action-runner/github_webhook_secret"),
+            Path::new("/var/lib/action-runner/.github_webhook_secret"),
+            Path::new("/home/action-runner/.github_webhook_secret"),
+            Path::new("/home/lma1980/.github_webhook_secret"),
+        ];
+        let env_secret = env::var("GITHUB_WEBHOOK_SECRET").ok();
+        let webhook_secret = resolve_webhook_secret(env_secret.as_deref(), &candidate_paths);
 
         let allow_insecure_no_secret = env::var("ACTION_RUNNER_ALLOW_INSECURE_NO_SECRET")
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
@@ -292,5 +314,31 @@ mod tests {
         assert!(!config.is_pr_author_allowed("NONE"));
         assert!(!config.is_pr_author_allowed("FIRST_TIME_CONTRIBUTOR"));
         assert!(!config.is_pr_author_allowed("CONTRIBUTOR"));
+    }
+
+    #[test]
+    fn test_resolve_webhook_secret_from_file_and_literal() {
+        let tmp_path =
+            std::env::temp_dir().join(format!("action_runner_secret_test_{}", std::process::id()));
+        fs::write(&tmp_path, "  file-secret-value-123\n").unwrap();
+
+        // 1. Env var points to a file path -> reads file contents (not the path string)
+        let res = resolve_webhook_secret(tmp_path.to_str(), &[]);
+        assert_eq!(res.as_deref(), Some("file-secret-value-123"));
+
+        // 2. Env var points to non-existent absolute path -> falls back to candidate_paths
+        let res_fallback =
+            resolve_webhook_secret(Some("/nonexistent/path/to/secret"), &[tmp_path.as_path()]);
+        assert_eq!(res_fallback.as_deref(), Some("file-secret-value-123"));
+
+        // 3. Env var points to non-existent absolute path with no valid fallback -> returns None (not path string)
+        let res_none = resolve_webhook_secret(Some("/nonexistent/path/to/secret"), &[]);
+        assert!(res_none.is_none());
+
+        // 4. Env var is a literal secret string -> returns trimmed literal
+        let res_literal = resolve_webhook_secret(Some("  literal-secret-abc  "), &[]);
+        assert_eq!(res_literal.as_deref(), Some("literal-secret-abc"));
+
+        let _ = fs::remove_file(&tmp_path);
     }
 }

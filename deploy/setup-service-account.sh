@@ -38,15 +38,38 @@ if [ -d "/home/lma1980/repository/ci-workspace/logs" ] && [ ! -f "/var/lib/actio
 fi
 
 chown -R action-runner:action-runner /var/lib/action-runner
+chown -R action-runner:action-runner /etc/action-runner
 chmod 750 /var/lib/action-runner
 chmod 700 /etc/action-runner
 
 # 3. Migrate webhook secret if present in /home/lma1980/.github_webhook_secret
-if [ -f "/home/lma1980/.github_webhook_secret" ] && [ ! -f "/etc/action-runner/github_webhook_secret" ]; then
-    echo "Copying webhook secret from /home/lma1980/.github_webhook_secret to /etc/action-runner/github_webhook_secret"
-    cp /home/lma1980/.github_webhook_secret /etc/action-runner/github_webhook_secret
-    chown action-runner:action-runner /etc/action-runner/github_webhook_secret
-    chmod 600 /etc/action-runner/github_webhook_secret
+if [ -f "/home/lma1980/.github_webhook_secret" ]; then
+    if [ ! -f "/etc/action-runner/github_webhook_secret" ]; then
+        echo "Copying webhook secret from /home/lma1980/.github_webhook_secret to /etc/action-runner/github_webhook_secret"
+        cp /home/lma1980/.github_webhook_secret /etc/action-runner/github_webhook_secret
+    fi
+    if [ ! -f "/var/lib/action-runner/.github_webhook_secret" ]; then
+        cp /home/lma1980/.github_webhook_secret /var/lib/action-runner/.github_webhook_secret
+    fi
+    chown action-runner:action-runner /etc/action-runner/github_webhook_secret /var/lib/action-runner/.github_webhook_secret
+    chmod 600 /etc/action-runner/github_webhook_secret /var/lib/action-runner/.github_webhook_secret
+fi
+
+# 3b. Provision Rust toolchain (.rustup) and Cargo subcommands (cargo-audit, cargo-llvm-cov)
+if [ -d "/home/lma1980/.rustup" ] && [ ! -d "/var/lib/action-runner/.rustup" ]; then
+    echo "Provisioning Rustup toolchain for action-runner from /home/lma1980/.rustup"
+    cp -a /home/lma1980/.rustup /var/lib/action-runner/.rustup
+    chown -R action-runner:action-runner /var/lib/action-runner/.rustup
+fi
+
+if [ -d "/home/lma1980/.cargo/bin" ]; then
+    mkdir -p /var/lib/action-runner/.cargo/bin /var/lib/action-runner/workspace/.cargo/bin
+    cp -a /home/lma1980/.cargo/bin/* /var/lib/action-runner/.cargo/bin/ 2>/dev/null || true
+    cp -a /home/lma1980/.cargo/bin/* /var/lib/action-runner/workspace/.cargo/bin/ 2>/dev/null || true
+    if [ -d "/home/lma1980/.cargo/advisory-db" ] && [ ! -d "/var/lib/action-runner/workspace/.cargo/advisory-db" ]; then
+        cp -a /home/lma1980/.cargo/advisory-db /var/lib/action-runner/workspace/.cargo/advisory-db
+    fi
+    chown -R action-runner:action-runner /var/lib/action-runner/.cargo /var/lib/action-runner/workspace/.cargo
 fi
 
 # 4. Migrate CI SSH Deploy Key if present
