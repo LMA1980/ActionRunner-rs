@@ -56,9 +56,10 @@ if [ -f "/home/lma1980/.github_webhook_secret" ]; then
 fi
 
 # 3b. Provision Rust toolchain (.rustup) and Cargo subcommands (cargo-audit, cargo-llvm-cov)
-if [ -d "/home/lma1980/.rustup" ] && [ ! -d "/var/lib/action-runner/.rustup" ]; then
+if [ -d "/home/lma1980/.rustup/toolchains" ] && [ ! -d "/var/lib/action-runner/.rustup/toolchains" ]; then
     echo "Provisioning Rustup toolchain for action-runner from /home/lma1980/.rustup"
-    cp -a /home/lma1980/.rustup /var/lib/action-runner/.rustup
+    mkdir -p /var/lib/action-runner/.rustup
+    cp -a /home/lma1980/.rustup/. /var/lib/action-runner/.rustup/
     chown -R action-runner:action-runner /var/lib/action-runner/.rustup
 fi
 
