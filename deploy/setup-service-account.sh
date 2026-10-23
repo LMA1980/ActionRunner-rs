@@ -73,6 +73,14 @@ if [ -d "/home/lma1980/.cargo/bin" ]; then
     chown -R action-runner:action-runner /var/lib/action-runner/.cargo /var/lib/action-runner/workspace/.cargo
 fi
 
+# 3c. Provision Python user site-packages (.local) such as mdformat-gfm
+if [ -d "/home/lma1980/.local" ] && [ ! -d "/var/lib/action-runner/.local/lib" ]; then
+    echo "Provisioning Python .local packages (e.g., mdformat-gfm) for action-runner"
+    mkdir -p /var/lib/action-runner/.local
+    cp -a /home/lma1980/.local/. /var/lib/action-runner/.local/
+    chown -R action-runner:action-runner /var/lib/action-runner/.local
+fi
+
 # 4. Migrate CI SSH Deploy Key if present
 if [ -f "/home/lma1980/.ssh/id_k3_ci" ] && [ ! -f "/var/lib/action-runner/.ssh/id_k3_ci" ]; then
     echo "Provisioning CI deploy key for action-runner"
