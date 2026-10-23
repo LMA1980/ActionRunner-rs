@@ -1237,12 +1237,6 @@ mod tests {
             .arg("ci@test.com")
             .current_dir(&work_dir)
             .status();
-        let _ = StdCommand::new("git")
-            .arg("config")
-            .arg("commit.gpgsign")
-            .arg("false")
-            .current_dir(&work_dir)
-            .status();
 
         std::fs::write(work_dir.join("file.txt"), "first commit\n").unwrap();
         assert!(StdCommand::new("git")
@@ -1460,12 +1454,6 @@ mod tests {
             .arg("config")
             .arg("user.email")
             .arg("ci@test.com")
-            .current_dir(&work_dir)
-            .status();
-        let _ = StdCommand::new("git")
-            .arg("config")
-            .arg("commit.gpgsign")
-            .arg("false")
             .current_dir(&work_dir)
             .status();
 

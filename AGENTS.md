@@ -1,5 +1,8 @@
 # ActionRunner-rs Agent Guidelines
 
+> [!IMPORTANT]
+> **Scope of `AGENTS.md`**: This file is reserved strictly for **immediate, universal behavioral rules and hard invariants** that govern every agent interaction. Do NOT place occasional notes, component designs, framework preferences, or operational runbooks here; those belong in repository-specific documentation (`README.md`, `specs/`, or `docs/`).
+
 ## 1. Service Account Isolation & Daemon Deployment (`pey-wail-deu`)
 
 - **Verify Toolchains Under Target Service Account**: When configuring or debugging `action-runner` running under its isolated service account (`User=action-runner` with `ProtectSystem=strict` and `ProtectHome=read-only`), always verify tool availability directly as that user (`sudo -u action-runner ...`), including:
