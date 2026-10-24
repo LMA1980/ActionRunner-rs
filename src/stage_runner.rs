@@ -21,6 +21,8 @@ pub struct StageRunner {
 pub struct StageExecutionResult {
     pub exit_code: i32,
     pub duration_secs: u64,
+    #[allow(dead_code)]
+    pub pid: u32,
     pub error_message: Option<String>,
 }
 
@@ -33,6 +35,7 @@ impl StageRunner {
         &self,
         task: &StageDispatchTask,
         log_tx: mpsc::Sender<Vec<u8>>,
+        started_tx: Option<tokio::sync::oneshot::Sender<u32>>,
     ) -> StageExecutionResult {
         let start_time = Utc::now();
         info!(
@@ -43,7 +46,7 @@ impl StageRunner {
             "Executing stage on worker node"
         );
 
-        let stage_dir = self.prepare_stage_workspace(task).await;
+        let stage_dir = self.prepare_stage_workspace(task, &log_tx).await;
 
         let working_dir = match &task.working_dir {
             Some(rel) => stage_dir.join(rel),
@@ -113,10 +116,33 @@ impl StageRunner {
                 return StageExecutionResult {
                     exit_code: -1,
                     duration_secs: 0,
+                    pid: 0,
                     error_message: Some(err_msg),
                 };
             }
         };
+
+        let pid = child.id().unwrap_or(0);
+        if let Some(tx) = started_tx {
+            let _ = tx.send(pid);
+        }
+
+        // Emit initial process spawned log entry so zero-output commands still have lifecycle visibility
+        let spawn_entry = LogEntry {
+            timestamp_us: Utc::now().timestamp_micros(),
+            job_id: task.job_id.clone(),
+            stage_id: task.stage_id.clone(),
+            node_id: self.config.node_id.clone(),
+            stream: 1,
+            line_no: 0,
+            content: format!(
+                "[ActionRunner-rs] Process spawned with PID {} ({})",
+                pid, task.command
+            ),
+        };
+        if let Ok(bytes) = encode_log_batch(&[spawn_entry]) {
+            let _ = log_tx.send(bytes).await;
+        }
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -213,14 +239,13 @@ impl StageRunner {
         let _ = out_handle.await;
         let _ = err_handle.await;
 
-        self.cleanup_stage_workspace(&stage_dir).await;
-
         let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
 
-        match execution_result {
+        let res = match execution_result {
             Ok(Ok(status)) => StageExecutionResult {
                 exit_code: status.code().unwrap_or(-1),
                 duration_secs,
+                pid,
                 error_message: if status.success() {
                     None
                 } else {
@@ -233,6 +258,7 @@ impl StageRunner {
             Ok(Err(e)) => StageExecutionResult {
                 exit_code: -1,
                 duration_secs,
+                pid,
                 error_message: Some(format!("I/O wait error: {}", e)),
             },
             Err(_) => {
@@ -240,13 +266,34 @@ impl StageRunner {
                 StageExecutionResult {
                     exit_code: 124, // Standard timeout code
                     duration_secs,
+                    pid,
                     error_message: Some(format!(
                         "Stage timed out after {} seconds",
                         task.timeout_seconds
                     )),
                 }
             }
+        };
+
+        // Emit final process completion log entry
+        let exit_entry = LogEntry {
+            timestamp_us: Utc::now().timestamp_micros(),
+            job_id: task.job_id.clone(),
+            stage_id: task.stage_id.clone(),
+            node_id: self.config.node_id.clone(),
+            stream: 1,
+            line_no: line_counter.load(Ordering::Relaxed),
+            content: format!(
+                "[ActionRunner-rs] Process exited with status code {} (PID {}, elapsed {}s)",
+                res.exit_code, pid, res.duration_secs
+            ),
+        };
+        if let Ok(bytes) = encode_log_batch(&[exit_entry]) {
+            let _ = log_tx.send(bytes).await;
         }
+
+        self.cleanup_stage_workspace(&stage_dir).await;
+        res
     }
 
     fn apply_toolchain_env(&self, cmd: &mut Command, task: &StageDispatchTask) {
@@ -298,7 +345,11 @@ impl StageRunner {
         }
     }
 
-    async fn prepare_stage_workspace(&self, task: &StageDispatchTask) -> PathBuf {
+    async fn prepare_stage_workspace(
+        &self,
+        task: &StageDispatchTask,
+        log_tx: &mpsc::Sender<Vec<u8>>,
+    ) -> PathBuf {
         let repo_cache = self
             .config
             .workspace_dir
@@ -306,6 +357,26 @@ impl StageRunner {
             .join(&task.repo_name);
         let stages_dir = self.config.workspace_dir.join("stages");
         let stage_dir = stages_dir.join(format!("{}_{}", task.job_id, task.stage_id));
+
+        let emit_git_log = |content: String| {
+            let entry = LogEntry {
+                timestamp_us: Utc::now().timestamp_micros(),
+                job_id: task.job_id.clone(),
+                stage_id: "step-0".to_string(),
+                node_id: self.config.node_id.clone(),
+                stream: 1,
+                line_no: 0,
+                content,
+            };
+            if let Ok(bytes) = encode_log_batch(&[entry]) {
+                let _ = log_tx.try_send(bytes);
+            }
+        };
+
+        emit_git_log(format!(
+            "[ActionRunner-rs] Synchronizing workspace cache for '{}'...",
+            task.repo_name
+        ));
 
         let _ = tokio::fs::create_dir_all(&stages_dir).await;
 
@@ -337,6 +408,11 @@ impl StageRunner {
                         .status()
                         .await;
 
+                    emit_git_log(format!(
+                        "[ActionRunner-rs] Checked out target commit '{}' into stage workspace",
+                        task.commit_sha
+                    ));
+
                     let _ = Command::new("git")
                         .arg("submodule")
                         .arg("update")
@@ -346,6 +422,9 @@ impl StageRunner {
                         .status()
                         .await;
 
+                    emit_git_log(
+                        "[ActionRunner-rs] Git submodules synchronized successfully".to_string(),
+                    );
                     return stage_dir;
                 }
             }
@@ -369,6 +448,11 @@ impl StageRunner {
             .status()
             .await;
 
+        emit_git_log(format!(
+            "[ActionRunner-rs] Checked out target commit '{}' into stage workspace",
+            task.commit_sha
+        ));
+
         let _ = Command::new("git")
             .arg("submodule")
             .arg("update")
@@ -377,6 +461,8 @@ impl StageRunner {
             .current_dir(&stage_dir)
             .status()
             .await;
+
+        emit_git_log("[ActionRunner-rs] Git submodules synchronized successfully".to_string());
 
         stage_dir
     }

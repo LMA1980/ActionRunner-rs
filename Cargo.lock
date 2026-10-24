@@ -11,6 +11,7 @@ dependencies = [
  "chrono",
  "fory",
  "futures-util",
+ "libc",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -24,7 +25,7 @@ dependencies = [
 [[package]]
 name = "action-runner-ipc"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/ActionRunner-ipc.git?branch=feat%2Fworker-shutdown-signal#522f9f70e478fbff85f1c37e28ed36644c347a8e"
+source = "git+https://github.com/LMA1980/ActionRunner-ipc.git?branch=feat%2Fstage-pid-tracking-and-queue-fairness#f93361a9037b748c40fc709115eb81195cc5815d"
 dependencies = [
  "arrow",
  "bytes",
