@@ -1,26 +1,29 @@
-version: "1"
+version: "2"
 name: "ActionRunner-rs Release Pipeline: Production Binary Verification"
 
-env:
-  CARGO_TERM_COLOR: always
-
-steps:
-  - name: "Verify Rust Formatting (cargo fmt)"
+stages:
+  - id: fmt-check
+    name: "Verify Rust Formatting"
+    tags: ["fmt"]
+    threads: 2
     run: "cargo fmt --check"
-    timeout_seconds: 120
 
-  - name: "Verify Rust Linter & Clippy Rules (cargo clippy)"
+  - id: clippy-check
+    name: "Verify Rust Linter & Clippy Rules"
+    tags: ["clippy"]
+    threads: 4
     run: "cargo clippy --all-targets -- -D warnings"
-    timeout_seconds: 300
 
-  - name: "Verify Dependencies Security Advisories (cargo audit)"
-    run: "cargo audit"
-    timeout_seconds: 180
-
-  - name: "Evaluate Test Suite & Line Code Coverage (cargo llvm-cov)"
+  - id: coverage-test
+    name: "Evaluate Test Suite & Line Code Coverage (cargo llvm-cov)"
+    tags: ["test"]
+    depends_on: ["fmt-check", "clippy-check"]
+    threads: 4
     run: "cargo llvm-cov --summary-only"
-    timeout_seconds: 300
 
-  - name: "Build Production Optimized Binary"
+  - id: release-build
+    name: "Build Production Optimized Binary"
+    tags: ["build"]
+    depends_on: ["fmt-check", "clippy-check"]
+    threads: 4
     run: "cargo build --release"
-    timeout_seconds: 600
