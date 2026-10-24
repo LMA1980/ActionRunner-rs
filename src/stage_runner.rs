@@ -55,8 +55,10 @@ impl StageRunner {
             IsolationMode::SystemdRun => {
                 let unit_name = format!(
                     "ar-{}-{}",
-                    task.job_id.replace(|c: char| !c.is_ascii_alphanumeric(), "_"),
-                    task.stage_id.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+                    task.job_id
+                        .replace(|c: char| !c.is_ascii_alphanumeric(), "_"),
+                    task.stage_id
+                        .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
                 );
                 let mut scmd = Command::new("systemd-run");
                 scmd.arg("--pipe")
@@ -222,7 +224,10 @@ impl StageRunner {
                 error_message: if status.success() {
                     None
                 } else {
-                    Some(format!("Command exited with status code {:?}", status.code()))
+                    Some(format!(
+                        "Command exited with status code {:?}",
+                        status.code()
+                    ))
                 },
             },
             Ok(Err(e)) => StageExecutionResult {
@@ -245,7 +250,8 @@ impl StageRunner {
     }
 
     fn apply_toolchain_env(&self, cmd: &mut Command, task: &StageDispatchTask) {
-        let base_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+        let base_path =
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
 
         match task.toolchain.as_deref() {
             Some("llvm-24") => {
@@ -257,8 +263,14 @@ impl StageRunner {
                 cmd.env("PATH", format!("{}:{}", llvm_bin, base_path));
                 cmd.env("CC", "clang");
                 cmd.env("CXX", "clang++");
-                cmd.env("RUSTFLAGS", "-C target-feature=+v -C target-cpu=spacemit-x100");
-                info!(toolchain = "llvm-24", "Injected LLVM 24 environment with RVV 1.0 flags");
+                cmd.env(
+                    "RUSTFLAGS",
+                    "-C target-feature=+v -C target-cpu=spacemit-x100",
+                );
+                info!(
+                    toolchain = "llvm-24",
+                    "Injected LLVM 24 environment with RVV 1.0 flags"
+                );
             }
             Some("gcc-17") | Some("gcc-17-spacemit-x100") => {
                 let gcc_bin = if Path::new("/home/lma1980/opt/gcc-17-spacemit-x100/bin").exists() {
@@ -273,7 +285,10 @@ impl StageRunner {
                 cmd.env("CXX", "g++");
                 cmd.env("CFLAGS", "-mcpu=spacemit-x100 -march=rv64gcv");
                 cmd.env("CXXFLAGS", "-mcpu=spacemit-x100 -march=rv64gcv");
-                info!(toolchain = "gcc-17", "Injected GCC 17 SpacemiT X100 environment");
+                info!(
+                    toolchain = "gcc-17",
+                    "Injected GCC 17 SpacemiT X100 environment"
+                );
             }
             _ => {
                 if self.config.arch == "riscv64" {
@@ -284,7 +299,11 @@ impl StageRunner {
     }
 
     async fn prepare_stage_workspace(&self, task: &StageDispatchTask) -> PathBuf {
-        let repo_cache = self.config.workspace_dir.join("cache").join(&task.repo_name);
+        let repo_cache = self
+            .config
+            .workspace_dir
+            .join("cache")
+            .join(&task.repo_name);
         let stages_dir = self.config.workspace_dir.join("stages");
         let stage_dir = stages_dir.join(format!("{}_{}", task.job_id, task.stage_id));
 

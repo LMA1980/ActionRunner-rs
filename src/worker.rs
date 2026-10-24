@@ -58,12 +58,12 @@ impl WorkerAgent {
         }
     }
 
-    pub async fn connect_and_process(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn connect_and_process(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut req = self.config.controller_url.clone().into_client_request()?;
-        req.headers_mut().insert(
-            "x-cluster-token",
-            self.config.cluster_token.parse()?,
-        );
+        req.headers_mut()
+            .insert("x-cluster-token", self.config.cluster_token.parse()?);
 
         let (ws_stream, _) = connect_async(req).await?;
         info!("Successfully connected to cluster tunnel!");
@@ -121,12 +121,8 @@ impl WorkerAgent {
 
                 if let Ok(payload) = hb_fory.serialize(&hb) {
                     hb_seq += 1;
-                    let hdr = IpcHeader::new(
-                        MSG_TYPE_WORKER_HEARTBEAT,
-                        payload.len() as u32,
-                        0,
-                        hb_seq,
-                    );
+                    let hdr =
+                        IpcHeader::new(MSG_TYPE_WORKER_HEARTBEAT, payload.len() as u32, 0, hb_seq);
                     let mut frame =
                         Vec::with_capacity(action_runner_ipc::HEADER_SIZE + payload.len());
                     frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));

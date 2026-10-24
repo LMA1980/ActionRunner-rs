@@ -57,6 +57,10 @@ async fn test_stage_runner_execution_and_log_batching() {
     }
 
     assert!(!all_logs.is_empty());
-    assert!(all_logs.iter().any(|l| l.content.contains("Hello from StageRunner")));
-    assert!(all_logs.iter().any(|l| l.content.contains("Second line output")));
+    assert!(all_logs
+        .iter()
+        .any(|l| l.content.contains("Hello from StageRunner")));
+    assert!(all_logs
+        .iter()
+        .any(|l| l.content.contains("Second line output")));
 }

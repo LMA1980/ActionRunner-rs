@@ -29,9 +29,7 @@ impl WorkerConfig {
         let cluster_token = Self::resolve_secret("ACTION_RUNNER_CLUSTER_TOKEN")
             .unwrap_or_else(|| "action-runner-default-cluster-token".to_string());
 
-        let node_id = std::env::var("ACTION_RUNNER_NODE_ID").unwrap_or_else(|_| {
-            hostname()
-        });
+        let node_id = std::env::var("ACTION_RUNNER_NODE_ID").unwrap_or_else(|_| hostname());
 
         let arch = std::env::var("ACTION_RUNNER_ARCH")
             .unwrap_or_else(|_| std::env::consts::ARCH.to_string());
