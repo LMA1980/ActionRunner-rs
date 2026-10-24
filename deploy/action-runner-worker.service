@@ -1,0 +1,31 @@
+[Unit]
+Description=ActionRunner Distributed Execution Worker Daemon
+Documentation=https://github.com/LMA1980/ActionRunner-rs
+After=network.target
+
+[Service]
+Type=simple
+User=action-runner
+Group=action-runner
+WorkingDirectory=/var/lib/action-runner
+EnvironmentFile=/etc/action-runner/worker.env
+Environment=RUSTUP_HOME=/var/lib/action-runner/.rustup
+Environment=CARGO_HOME=/var/lib/action-runner/.cargo
+Environment=PATH=/var/lib/action-runner/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/action-runner
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+ReadWritePaths=/var/lib/action-runner
+InaccessiblePaths=/etc/shadow /root
+
+[Install]
+WantedBy=multi-user.target
