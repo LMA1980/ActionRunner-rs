@@ -1,14 +1,15 @@
 use action_runner_ipc::{
     create_fory_runtime, IpcHeader, StageCompletionReport, StageDispatchTask, WorkerHeartbeat,
-    WorkerRegistration, MSG_TYPE_ARROW_LOG, MSG_TYPE_STAGE_COMPLETION, MSG_TYPE_STAGE_DISPATCH,
-    MSG_TYPE_WORKER_HEARTBEAT, MSG_TYPE_WORKER_REGISTRATION,
+    WorkerRegistration, WorkerShutdown, MSG_TYPE_ARROW_LOG, MSG_TYPE_STAGE_COMPLETION,
+    MSG_TYPE_STAGE_DISPATCH, MSG_TYPE_WORKER_HEARTBEAT, MSG_TYPE_WORKER_REGISTRATION,
+    MSG_TYPE_WORKER_SHUTDOWN,
 };
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::sleep;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -18,9 +19,30 @@ use tracing::{info, warn};
 use crate::config::WorkerConfig;
 use crate::stage_runner::StageRunner;
 
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received SIGINT shutdown signal");
+                }
+                _ = term.recv() => {
+                    tracing::info!("Received SIGTERM shutdown signal from OS/systemd");
+                }
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("Received Ctrl-C shutdown signal");
+}
+
 pub struct WorkerAgent {
     config: WorkerConfig,
     active_slots: Arc<AtomicU32>,
+    active_stages: Arc<RwLock<Vec<String>>>,
 }
 
 impl WorkerAgent {
@@ -28,31 +50,67 @@ impl WorkerAgent {
         Self {
             config,
             active_slots: Arc::new(AtomicU32::new(0)),
+            active_stages: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
     pub async fn run_forever(self) {
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+        tokio::spawn(async move {
+            wait_for_shutdown_signal().await;
+            let _ = shutdown_tx.send(true);
+        });
+
         let mut backoff = Duration::from_secs(1);
 
         loop {
+            if *shutdown_rx.borrow() {
+                info!("Worker shutting down per received signal; terminating main loop");
+                break;
+            }
+
             info!(
                 controller = %self.config.controller_url,
                 "Attempting connection to ActionRunner-controller cluster tunnel..."
             );
 
-            match self.connect_and_process().await {
-                Ok(()) => {
-                    info!("Cluster session concluded cleanly; reconnecting...");
-                    backoff = Duration::from_secs(1);
+            let mut shutdown_watch = shutdown_rx.clone();
+            tokio::select! {
+                res = self.connect_and_process(&mut shutdown_watch) => {
+                    match res {
+                        Ok(()) => {
+                            if *shutdown_rx.borrow() {
+                                info!("Worker shutting down cleanly; exiting");
+                                break;
+                            }
+                            info!("Cluster session concluded cleanly; reconnecting...");
+                            backoff = Duration::from_secs(1);
+                        }
+                        Err(e) => {
+                            if *shutdown_rx.borrow() {
+                                info!("Worker shutting down; exiting");
+                                break;
+                            }
+                            warn!(
+                                error = %e,
+                                retry_in = ?backoff,
+                                "Cluster connection error; backing off before retry"
+                            );
+                            tokio::select! {
+                                _ = sleep(backoff) => {}
+                                _ = shutdown_rx.changed() => {
+                                    info!("Shutdown signaled during retry backoff; exiting");
+                                    break;
+                                }
+                            }
+                            backoff = (backoff * 2).min(Duration::from_secs(15));
+                        }
+                    }
                 }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        retry_in = ?backoff,
-                        "Cluster connection error; backing off before retry"
-                    );
-                    sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(15));
+                _ = shutdown_rx.changed() => {
+                    info!("Shutdown signaled during tunnel operation; exiting");
+                    break;
                 }
             }
         }
@@ -60,6 +118,7 @@ impl WorkerAgent {
 
     pub async fn connect_and_process(
         &self,
+        shutdown_watch: &mut tokio::sync::watch::Receiver<bool>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut req = self.config.controller_url.clone().into_client_request()?;
         req.headers_mut()
@@ -138,6 +197,34 @@ impl WorkerAgent {
 
         loop {
             tokio::select! {
+                _ = shutdown_watch.changed() => {
+                    if *shutdown_watch.borrow() {
+                        info!("Received shutdown signal; notifying coordinator before disconnecting");
+                        let interrupted = self.active_stages.read().await.clone();
+                        let shutdown_payload = WorkerShutdown {
+                            node_id: self.config.node_id.clone(),
+                            reason: "Worker daemon restarting / shutting down (SIGTERM/SIGINT)".to_string(),
+                            interrupted_stages: interrupted.clone(),
+                        };
+                        if let Ok(payload) = fory.serialize(&shutdown_payload) {
+                            seq += 1;
+                            let hdr = IpcHeader::new(
+                                MSG_TYPE_WORKER_SHUTDOWN,
+                                payload.len() as u32,
+                                0,
+                                seq,
+                            );
+                            let mut frame = Vec::with_capacity(action_runner_ipc::HEADER_SIZE + payload.len());
+                            frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
+                            frame.extend_from_slice(&payload);
+                            let _ = ws_sender.send(Message::Binary(frame.into())).await;
+                            let _ = ws_sender.flush().await;
+                            info!(node = %self.config.node_id, stages = ?interrupted, "Dispatched WorkerShutdown frame to coordinator");
+                        }
+                        break;
+                    }
+                }
+
                 // Outbound messages to send to coordinator
                 Some(frame) = outbound_rx.recv() => {
                     ws_sender.send(Message::Binary(frame.into())).await?;
@@ -161,9 +248,11 @@ impl WorkerAgent {
                                             let runner = stage_runner.clone();
                                             let out_tx = outbound_tx.clone();
                                             let active_counter = self.active_slots.clone();
+                                            let active_stages = self.active_stages.clone();
                                             let comp_fory = create_fory_runtime()?;
 
                                             active_counter.fetch_add(1, Ordering::Relaxed);
+                                            active_stages.write().await.push(task.stage_id.clone());
 
                                             tokio::spawn(async move {
                                                 let (log_batch_tx, mut log_batch_rx) = mpsc::channel::<Vec<u8>>(32);
@@ -193,6 +282,7 @@ impl WorkerAgent {
                                                 let _ = log_forwarder.await;
 
                                                 active_counter.fetch_sub(1, Ordering::Relaxed);
+                                                active_stages.write().await.retain(|s| s != &task.stage_id);
 
                                                 let report = StageCompletionReport {
                                                     job_id: task.job_id.clone(),

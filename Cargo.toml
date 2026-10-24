@@ -7,8 +7,8 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/LMA1980/ActionRunner-rs"
 
 [dependencies]
-action-runner-ipc = { git = "https://github.com/LMA1980/ActionRunner-ipc.git" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "sync", "time", "fs", "io-util"] }
+action-runner-ipc = { git = "https://github.com/LMA1980/ActionRunner-ipc.git", branch = "feat/worker-shutdown-signal" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "sync", "time", "fs", "io-util", "signal"] }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
