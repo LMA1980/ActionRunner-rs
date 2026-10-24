@@ -24,7 +24,7 @@ dependencies = [
 [[package]]
 name = "action-runner-ipc"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/ActionRunner-ipc.git#d87b8e8dc3584ce50bfa10edc3982604ba123990"
+source = "git+https://github.com/LMA1980/ActionRunner-ipc.git?branch=feat%2Fworker-shutdown-signal#522f9f70e478fbff85f1c37e28ed36644c347a8e"
 dependencies = [
  "arrow",
  "bytes",
