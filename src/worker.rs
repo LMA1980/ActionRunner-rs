@@ -1,11 +1,13 @@
 use action_runner_ipc::{
-    create_fory_runtime, IpcHeader, StageCompletionReport, StageDispatchTask, WorkerHeartbeat,
-    WorkerRegistration, WorkerShutdown, MSG_TYPE_ARROW_LOG, MSG_TYPE_STAGE_COMPLETION,
-    MSG_TYPE_STAGE_DISPATCH, MSG_TYPE_WORKER_HEARTBEAT, MSG_TYPE_WORKER_REGISTRATION,
+    create_fory_runtime, IpcHeader, StageCancelTask, StageCompletionReport, StageDispatchTask,
+    StageStarted, WorkerHeartbeat, WorkerRegistration, WorkerShutdown, MSG_TYPE_ARROW_LOG,
+    MSG_TYPE_STAGE_CANCEL, MSG_TYPE_STAGE_COMPLETION, MSG_TYPE_STAGE_DISPATCH,
+    MSG_TYPE_STAGE_STARTED, MSG_TYPE_WORKER_HEARTBEAT, MSG_TYPE_WORKER_REGISTRATION,
     MSG_TYPE_WORKER_SHUTDOWN,
 };
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,6 +45,7 @@ pub struct WorkerAgent {
     config: WorkerConfig,
     active_slots: Arc<AtomicU32>,
     active_stages: Arc<RwLock<Vec<String>>>,
+    active_processes: Arc<RwLock<HashMap<String, u32>>>,
 }
 
 impl WorkerAgent {
@@ -51,6 +54,7 @@ impl WorkerAgent {
             config,
             active_slots: Arc::new(AtomicU32::new(0)),
             active_stages: Arc::new(RwLock::new(Vec::new())),
+            active_processes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -200,6 +204,13 @@ impl WorkerAgent {
                 _ = shutdown_watch.changed() => {
                     if *shutdown_watch.borrow() {
                         info!("Received shutdown signal; notifying coordinator before disconnecting");
+                        for pid in self.active_processes.read().await.values() {
+                            info!(pid = pid, "Terminating active process before worker disconnect");
+                            #[cfg(unix)]
+                            unsafe {
+                                libc::kill(*pid as i32, libc::SIGTERM);
+                            }
+                        }
                         let interrupted = self.active_stages.read().await.clone();
                         let shutdown_payload = WorkerShutdown {
                             node_id: self.config.node_id.clone(),
@@ -249,20 +260,75 @@ impl WorkerAgent {
                                             let out_tx = outbound_tx.clone();
                                             let active_counter = self.active_slots.clone();
                                             let active_stages = self.active_stages.clone();
+                                            let active_processes = self.active_processes.clone();
                                             let comp_fory = create_fory_runtime()?;
 
                                             active_counter.fetch_add(1, Ordering::Relaxed);
                                             active_stages.write().await.push(task.stage_id.clone());
 
+                                            let (started_tx, started_rx) =
+                                                tokio::sync::oneshot::channel::<u32>();
+                                            let node_id_started = self.config.node_id.clone();
+                                            let out_tx_started = outbound_tx.clone();
+                                            let stage_id_started = task.stage_id.clone();
+                                            let job_id_started = task.job_id.clone();
+                                            let active_proc_reg = active_processes.clone();
+
                                             tokio::spawn(async move {
-                                                let (log_batch_tx, mut log_batch_rx) = mpsc::channel::<Vec<u8>>(32);
+                                                if let Ok(pid) = started_rx.await {
+                                                    active_proc_reg
+                                                        .write()
+                                                        .await
+                                                        .insert(stage_id_started.clone(), pid);
+                                                    let started_event = StageStarted {
+                                                        job_id: job_id_started,
+                                                        stage_id: stage_id_started,
+                                                        node_id: node_id_started,
+                                                        pid,
+                                                        started_at_epoch_ms: Utc::now()
+                                                            .timestamp_millis()
+                                                            as u64,
+                                                    };
+                                                    if let Ok(sfory) = create_fory_runtime() {
+                                                        if let Ok(spayload) =
+                                                            sfory.serialize(&started_event)
+                                                        {
+                                                            let shdr = IpcHeader::new(
+                                                                MSG_TYPE_STAGE_STARTED,
+                                                                spayload.len() as u32,
+                                                                0,
+                                                                1001,
+                                                            );
+                                                            let mut sframe = Vec::with_capacity(
+                                                                action_runner_ipc::HEADER_SIZE
+                                                                    + spayload.len(),
+                                                            );
+                                                            sframe.extend_from_slice(
+                                                                zerocopy::IntoBytes::as_bytes(
+                                                                    &shdr,
+                                                                ),
+                                                            );
+                                                            sframe.extend_from_slice(&spayload);
+                                                            let _ = out_tx_started
+                                                                .send(sframe)
+                                                                .await;
+                                                        }
+                                                    }
+                                                }
+                                            });
+
+                                            tokio::spawn(async move {
+                                                let (log_batch_tx, mut log_batch_rx) =
+                                                    mpsc::channel::<Vec<u8>>(32);
 
                                                 // Forward log batches to tunnel outbound channel
                                                 let log_forwarder = {
                                                     let out_tx = out_tx.clone();
                                                     tokio::spawn(async move {
                                                         let mut l_seq = 2000u64;
-                                                        while let Some(batch_bytes) = log_batch_rx.recv().await {
+                                                        while let Some(batch_bytes) =
+                                                            log_batch_rx.recv().await
+                                                        {
                                                             l_seq += 1;
                                                             let log_hdr = IpcHeader::new(
                                                                 MSG_TYPE_ARROW_LOG,
@@ -270,19 +336,39 @@ impl WorkerAgent {
                                                                 0,
                                                                 l_seq,
                                                             );
-                                                            let mut frame = Vec::with_capacity(action_runner_ipc::HEADER_SIZE + batch_bytes.len());
-                                                            frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&log_hdr));
+                                                            let mut frame = Vec::with_capacity(
+                                                                action_runner_ipc::HEADER_SIZE
+                                                                    + batch_bytes.len(),
+                                                            );
+                                                            frame.extend_from_slice(
+                                                                zerocopy::IntoBytes::as_bytes(
+                                                                    &log_hdr,
+                                                                ),
+                                                            );
                                                             frame.extend_from_slice(&batch_bytes);
                                                             let _ = out_tx.send(frame).await;
                                                         }
                                                     })
                                                 };
 
-                                                let res = runner.run_stage(&task, log_batch_tx).await;
+                                                let res = runner
+                                                    .run_stage(
+                                                        &task,
+                                                        log_batch_tx,
+                                                        Some(started_tx),
+                                                    )
+                                                    .await;
                                                 let _ = log_forwarder.await;
 
                                                 active_counter.fetch_sub(1, Ordering::Relaxed);
-                                                active_stages.write().await.retain(|s| s != &task.stage_id);
+                                                active_stages
+                                                    .write()
+                                                    .await
+                                                    .retain(|s| s != &task.stage_id);
+                                                active_processes
+                                                    .write()
+                                                    .await
+                                                    .remove(&task.stage_id);
 
                                                 let report = StageCompletionReport {
                                                     job_id: task.job_id.clone(),
@@ -292,22 +378,58 @@ impl WorkerAgent {
                                                     error_message: res.error_message,
                                                 };
 
-                                                if let Ok(comp_payload) = comp_fory.serialize(&report) {
+                                                if let Ok(comp_payload) =
+                                                    comp_fory.serialize(&report)
+                                                {
                                                     let comp_hdr = IpcHeader::new(
                                                         MSG_TYPE_STAGE_COMPLETION,
                                                         comp_payload.len() as u32,
                                                         0,
                                                         999,
                                                     );
-                                                    let mut frame = Vec::with_capacity(action_runner_ipc::HEADER_SIZE + comp_payload.len());
-                                                    frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&comp_hdr));
+                                                    let mut frame = Vec::with_capacity(
+                                                        action_runner_ipc::HEADER_SIZE
+                                                            + comp_payload.len(),
+                                                    );
+                                                    frame.extend_from_slice(
+                                                        zerocopy::IntoBytes::as_bytes(&comp_hdr),
+                                                    );
                                                     frame.extend_from_slice(&comp_payload);
                                                     let _ = out_tx.send(frame).await;
                                                 }
                                             });
                                         }
                                         Err(e) => {
-                                            tracing::error!(error = %e, "Worker failed to deserialize StageDispatchTask with Fory");
+                                            tracing::error!(
+                                                error = %e,
+                                                "Worker failed to deserialize StageDispatchTask with Fory"
+                                            );
+                                        }
+                                    }
+                                } else if hdr.msg_type == MSG_TYPE_STAGE_CANCEL {
+                                    if let Ok(cancel_task) =
+                                        fory.deserialize::<StageCancelTask>(payload)
+                                    {
+                                        info!(
+                                            stage = %cancel_task.stage_id,
+                                            reason = %cancel_task.reason,
+                                            "Worker received StageCancelTask; checking for active process"
+                                        );
+                                        let maybe_pid = self
+                                            .active_processes
+                                            .write()
+                                            .await
+                                            .remove(&cancel_task.stage_id);
+                                        if let Some(pid) = maybe_pid {
+                                            info!(
+                                                stage = %cancel_task.stage_id,
+                                                pid = pid,
+                                                "Terminating active process via SIGTERM"
+                                            );
+                                            #[cfg(unix)]
+                                            unsafe {
+                                                libc::kill(pid as i32, libc::SIGTERM);
+                                            }
                                         }
                                     }
                                 }

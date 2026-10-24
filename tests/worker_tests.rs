@@ -46,8 +46,12 @@ async fn test_stage_runner_execution_and_log_batching() {
         toolchain: None,
     };
 
-    let res = runner.run_stage(&task, log_tx).await;
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel::<u32>();
+    let res = runner.run_stage(&task, log_tx, Some(started_tx)).await;
     assert_eq!(res.exit_code, 0);
+    let pid = started_rx.await.expect("received pid");
+    assert!(pid > 0);
+    assert_eq!(res.pid, pid);
 
     let mut all_logs = Vec::new();
     while let Ok(batch_bytes) = log_rx.try_recv() {
