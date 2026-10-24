@@ -38,11 +38,16 @@ impl StageRunner {
         started_tx: Option<tokio::sync::oneshot::Sender<u32>>,
     ) -> StageExecutionResult {
         let start_time = Utc::now();
+        let build_jobs = std::env::var("CARGO_BUILD_JOBS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(task.threads);
+
         info!(
             job_id = %task.job_id,
             stage = %task.stage_id,
             toolchain = ?task.toolchain,
-            threads = task.threads,
+            threads = build_jobs,
             "Executing stage on worker node"
         );
 
@@ -93,7 +98,7 @@ impl StageRunner {
         cmd.env("STAGE_ID", &task.stage_id);
         cmd.env("GITHUB_REPOSITORY", &task.repo_name);
         cmd.env("GITHUB_SHA", &task.commit_sha);
-        cmd.env("CARGO_BUILD_JOBS", task.threads.to_string());
+        cmd.env("CARGO_BUILD_JOBS", build_jobs.to_string());
         cmd.env("CARGO_TERM_COLOR", "always");
 
         // Toolchain Injection (LLVM 24 / GCC 17 with SpacemiT X100 Target)
