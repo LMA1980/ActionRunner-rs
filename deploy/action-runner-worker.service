@@ -1,0 +1,37 @@
+[Unit]
+Description=ActionRunner Distributed CI Execution Worker Agent
+Documentation=https://github.com/LMA1980/ActionRunner-rs
+After=network.target
+
+[Service]
+Type=simple
+User=action-runner
+Group=action-runner
+WorkingDirectory=/var/lib/action-runner
+EnvironmentFile=-/etc/action-runner/worker.env
+Environment=ACTION_RUNNER_CONTROLLER_URL=ws://192.168.1.201:8000/api/cluster/tunnel
+Environment=ACTION_RUNNER_CLUSTER_TOKEN=/etc/action-runner/cluster_token
+Environment=ACTION_RUNNER_WORKSPACE=/var/lib/action-runner/workspace
+Environment=RUSTUP_HOME=/var/lib/action-runner/.rustup
+Environment=CARGO_HOME=/var/lib/action-runner/workspace/.cargo
+ExecStart=/usr/local/bin/action-runner
+Restart=always
+RestartSec=5
+
+# ==============================================================================
+# Security Hardening & Isolation Directives (Namespaces & CGroup v2)
+# ==============================================================================
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Directory Access Controls
+ReadWritePaths=/var/lib/action-runner
+InaccessiblePaths=/etc/shadow /root
+
+[Install]
+WantedBy=multi-user.target
