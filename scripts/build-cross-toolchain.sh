@@ -8,7 +8,7 @@
 set -euo pipefail
 
 PREFIX_BASE="${PREFIX_BASE:-/opt}"
-BUILD_ROOT="${BUILD_ROOT:-/tmp/cross-toolchain-build}"
+BUILD_ROOT="${BUILD_ROOT:-/var/lib/containers/cross-toolchain-build}"
 JOBS="${JOBS:-$(nproc)}"
 
 GCC_INSTALL_DIR="${PREFIX_BASE}/cross-gcc-17"
@@ -62,6 +62,7 @@ build_gcc17() {
     ../gcc/configure \
         --prefix="${GCC_INSTALL_DIR}" \
         --target="${TARGET_TRIPLE}" \
+        --with-sysroot="/usr/riscv64-linux-gnu" \
         --with-arch="${TARGET_ARCH}" \
         --with-abi="${TARGET_ABI}" \
         --with-tune=spacemit-x100 \
@@ -97,10 +98,10 @@ build_llvm24() {
     cmake -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="${LLVM_INSTALL_DIR}" \
-        -DLLVM_ENABLE_PROJECTS="clang;lld;compiler-rt" \
+        -DLLVM_ENABLE_PROJECTS="clang;lld" \
         -DLLVM_TARGETS_TO_BUILD="RISCV;X86" \
         -DLLVM_DEFAULT_TARGET_TRIPLE="${TARGET_TRIPLE}" \
-        -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+        -DDEFAULT_SYSROOT="/usr/riscv64-linux-gnu" \
         -DLLVM_OPTIMIZED_TABLEGEN=ON \
         -DLLVM_INCLUDE_BENCHMARKS=OFF \
         -DLLVM_INCLUDE_EXAMPLES=OFF \
@@ -124,8 +125,8 @@ export PATH="/opt/cross-llvm-24/bin:/opt/cross-gcc-17/bin:${PATH}"
 export CC="clang"
 export CXX="clang++"
 export TARGET="riscv64gc-unknown-linux-gnu"
-export CFLAGS="-target riscv64-unknown-linux-gnu -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d"
-export CXXFLAGS="-target riscv64-unknown-linux-gnu -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d"
+export CFLAGS="--target=riscv64-unknown-linux-gnu --sysroot=/usr/riscv64-linux-gnu -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d"
+export CXXFLAGS="--target=riscv64-unknown-linux-gnu --sysroot=/usr/riscv64-linux-gnu -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d"
 export RUSTFLAGS="-C target-feature=+v -C target-cpu=spacemit-x100"
 export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER="clang"
 export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-feature=+v -C target-cpu=spacemit-x100"
