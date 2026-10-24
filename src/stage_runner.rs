@@ -308,7 +308,6 @@ impl StageRunner {
         let stage_dir = stages_dir.join(format!("{}_{}", task.job_id, task.stage_id));
 
         let _ = tokio::fs::create_dir_all(&stages_dir).await;
-        let _ = tokio::fs::create_dir_all(&repo_cache).await;
 
         // Sync git cache mirror if needed
         self.sync_git_cache(task, &repo_cache).await;
@@ -329,6 +328,24 @@ impl StageRunner {
                         path = %stage_dir.display(),
                         "Created isolated Btrfs subvolume snapshot"
                     );
+
+                    let _ = Command::new("git")
+                        .arg("checkout")
+                        .arg("-f")
+                        .arg(&task.commit_sha)
+                        .current_dir(&stage_dir)
+                        .status()
+                        .await;
+
+                    let _ = Command::new("git")
+                        .arg("submodule")
+                        .arg("update")
+                        .arg("--init")
+                        .arg("--recursive")
+                        .current_dir(&stage_dir)
+                        .status()
+                        .await;
+
                     return stage_dir;
                 }
             }
@@ -352,11 +369,23 @@ impl StageRunner {
             .status()
             .await;
 
+        let _ = Command::new("git")
+            .arg("submodule")
+            .arg("update")
+            .arg("--init")
+            .arg("--recursive")
+            .current_dir(&stage_dir)
+            .status()
+            .await;
+
         stage_dir
     }
 
     async fn sync_git_cache(&self, task: &StageDispatchTask, repo_cache: &Path) {
         if !repo_cache.join(".git").exists() && !repo_cache.join("HEAD").exists() {
+            if let Some(parent) = repo_cache.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
             let _ = Command::new("git")
                 .arg("clone")
                 .arg(&task.clone_url)
@@ -376,14 +405,16 @@ impl StageRunner {
 
     async fn cleanup_stage_workspace(&self, stage_dir: &Path) {
         if self.config.use_btrfs {
-            let _ = Command::new("btrfs")
+            let res = Command::new("btrfs")
                 .arg("subvolume")
                 .arg("delete")
                 .arg(stage_dir)
                 .status()
                 .await;
-        } else {
-            let _ = tokio::fs::remove_dir_all(stage_dir).await;
+            if res.is_ok() && !stage_dir.exists() {
+                return;
+            }
         }
+        let _ = tokio::fs::remove_dir_all(stage_dir).await;
     }
 }
