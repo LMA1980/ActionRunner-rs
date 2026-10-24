@@ -125,6 +125,7 @@ impl StageRunner {
         let out_handle = {
             let log_tx = log_tx.clone();
             let node_id = self.config.node_id.clone();
+            let job_id = task.job_id.clone();
             let stage_id = task.stage_id.clone();
             let line_counter = line_counter.clone();
 
@@ -137,6 +138,7 @@ impl StageRunner {
                         let l_num = line_counter.fetch_add(1, Ordering::Relaxed);
                         buffer.push(LogEntry {
                             timestamp_us: Utc::now().timestamp_micros(),
+                            job_id: job_id.clone(),
                             stage_id: stage_id.clone(),
                             node_id: node_id.clone(),
                             stream: 1, // stdout
@@ -165,6 +167,7 @@ impl StageRunner {
         let err_handle = {
             let log_tx = log_tx.clone();
             let node_id = self.config.node_id.clone();
+            let job_id = task.job_id.clone();
             let stage_id = task.stage_id.clone();
             let line_counter = line_counter.clone();
 
@@ -177,6 +180,7 @@ impl StageRunner {
                         let l_num = line_counter.fetch_add(1, Ordering::Relaxed);
                         buffer.push(LogEntry {
                             timestamp_us: Utc::now().timestamp_micros(),
+                            job_id: job_id.clone(),
                             stage_id: stage_id.clone(),
                             node_id: node_id.clone(),
                             stream: 2, // stderr

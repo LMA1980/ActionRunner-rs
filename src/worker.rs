@@ -58,7 +58,7 @@ impl WorkerAgent {
         }
     }
 
-    async fn connect_and_process(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn connect_and_process(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut req = self.config.controller_url.clone().into_client_request()?;
         req.headers_mut().insert(
             "x-cluster-token",
@@ -155,67 +155,79 @@ impl WorkerAgent {
                     };
 
                     if let Message::Binary(bin) = msg {
-                        if let Ok((hdr, payload)) = IpcHeader::parse(&bin) {
-                            if hdr.msg_type == MSG_TYPE_STAGE_DISPATCH {
-                                if let Ok(task) = fory.deserialize::<StageDispatchTask>(payload) {
-                                    let runner = stage_runner.clone();
-                                    let out_tx = outbound_tx.clone();
-                                    let active_counter = self.active_slots.clone();
-                                    let comp_fory = create_fory_runtime()?;
+                        match IpcHeader::parse(&bin) {
+                            Ok((hdr, payload)) => {
+                                info!(msg_type = hdr.msg_type, payload_len = payload.len(), "Worker received binary frame");
+                                if hdr.msg_type == MSG_TYPE_STAGE_DISPATCH {
+                                    match fory.deserialize::<StageDispatchTask>(payload) {
+                                        Ok(task) => {
+                                            info!(stage = %task.stage_id, "Worker successfully deserialized StageDispatchTask");
+                                            let runner = stage_runner.clone();
+                                            let out_tx = outbound_tx.clone();
+                                            let active_counter = self.active_slots.clone();
+                                            let comp_fory = create_fory_runtime()?;
 
-                                    active_counter.fetch_add(1, Ordering::Relaxed);
+                                            active_counter.fetch_add(1, Ordering::Relaxed);
 
-                                    tokio::spawn(async move {
-                                        let (log_batch_tx, mut log_batch_rx) = mpsc::channel::<Vec<u8>>(32);
-
-                                        // Forward log batches to tunnel outbound channel
-                                        let log_forwarder = {
-                                            let out_tx = out_tx.clone();
                                             tokio::spawn(async move {
-                                                let mut l_seq = 2000u64;
-                                                while let Some(batch_bytes) = log_batch_rx.recv().await {
-                                                    l_seq += 1;
-                                                    let log_hdr = IpcHeader::new(
-                                                        MSG_TYPE_ARROW_LOG,
-                                                        batch_bytes.len() as u32,
+                                                let (log_batch_tx, mut log_batch_rx) = mpsc::channel::<Vec<u8>>(32);
+
+                                                // Forward log batches to tunnel outbound channel
+                                                let log_forwarder = {
+                                                    let out_tx = out_tx.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut l_seq = 2000u64;
+                                                        while let Some(batch_bytes) = log_batch_rx.recv().await {
+                                                            l_seq += 1;
+                                                            let log_hdr = IpcHeader::new(
+                                                                MSG_TYPE_ARROW_LOG,
+                                                                batch_bytes.len() as u32,
+                                                                0,
+                                                                l_seq,
+                                                            );
+                                                            let mut frame = Vec::with_capacity(action_runner_ipc::HEADER_SIZE + batch_bytes.len());
+                                                            frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&log_hdr));
+                                                            frame.extend_from_slice(&batch_bytes);
+                                                            let _ = out_tx.send(frame).await;
+                                                        }
+                                                    })
+                                                };
+
+                                                let res = runner.run_stage(&task, log_batch_tx).await;
+                                                let _ = log_forwarder.await;
+
+                                                active_counter.fetch_sub(1, Ordering::Relaxed);
+
+                                                let report = StageCompletionReport {
+                                                    job_id: task.job_id.clone(),
+                                                    stage_id: task.stage_id.clone(),
+                                                    exit_code: res.exit_code,
+                                                    duration_secs: res.duration_secs,
+                                                    error_message: res.error_message,
+                                                };
+
+                                                if let Ok(comp_payload) = comp_fory.serialize(&report) {
+                                                    let comp_hdr = IpcHeader::new(
+                                                        MSG_TYPE_STAGE_COMPLETION,
+                                                        comp_payload.len() as u32,
                                                         0,
-                                                        l_seq,
+                                                        999,
                                                     );
-                                                    let mut frame = Vec::with_capacity(action_runner_ipc::HEADER_SIZE + batch_bytes.len());
-                                                    frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&log_hdr));
-                                                    frame.extend_from_slice(&batch_bytes);
+                                                    let mut frame = Vec::with_capacity(action_runner_ipc::HEADER_SIZE + comp_payload.len());
+                                                    frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&comp_hdr));
+                                                    frame.extend_from_slice(&comp_payload);
                                                     let _ = out_tx.send(frame).await;
                                                 }
-                                            })
-                                        };
-
-                                        let res = runner.run_stage(&task, log_batch_tx).await;
-                                        let _ = log_forwarder.await;
-
-                                        active_counter.fetch_sub(1, Ordering::Relaxed);
-
-                                        let report = StageCompletionReport {
-                                            job_id: task.job_id.clone(),
-                                            stage_id: task.stage_id.clone(),
-                                            exit_code: res.exit_code,
-                                            duration_secs: res.duration_secs,
-                                            error_message: res.error_message,
-                                        };
-
-                                        if let Ok(comp_payload) = comp_fory.serialize(&report) {
-                                            let comp_hdr = IpcHeader::new(
-                                                MSG_TYPE_STAGE_COMPLETION,
-                                                comp_payload.len() as u32,
-                                                0,
-                                                999,
-                                            );
-                                            let mut frame = Vec::with_capacity(action_runner_ipc::HEADER_SIZE + comp_payload.len());
-                                            frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&comp_hdr));
-                                            frame.extend_from_slice(&comp_payload);
-                                            let _ = out_tx.send(frame).await;
+                                            });
                                         }
-                                    });
+                                        Err(e) => {
+                                            tracing::error!(error = %e, "Worker failed to deserialize StageDispatchTask with Fory");
+                                        }
+                                    }
                                 }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = ?e, "Worker failed to parse IpcHeader");
                             }
                         }
                     }
