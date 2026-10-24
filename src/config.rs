@@ -1,344 +1,172 @@
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
-/// Validates that a repository name adheres to strict owner/name format with no directory traversal
-pub fn is_safe_repo_name(repo: &str) -> bool {
-    let parts: Vec<&str> = repo.split('/').collect();
-    if parts.len() != 2 {
-        return false;
-    }
-    let owner = parts[0];
-    let name = parts[1];
-    if owner.is_empty() || name.is_empty() {
-        return false;
-    }
-    if owner.contains("..") || name.contains("..") {
-        return false;
-    }
-    let is_valid_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.';
-    owner.chars().all(is_valid_char) && name.chars().all(is_valid_char)
+#[derive(Debug, Clone)]
+pub struct WorkerConfig {
+    pub controller_url: String,
+    pub cluster_token: String,
+    pub node_id: String,
+    pub arch: String,
+    pub tags: Vec<String>,
+    pub max_slots: u32,
+    pub workspace_dir: PathBuf,
+    pub toolchains: Vec<String>,
+    pub use_btrfs: bool,
+    pub isolation_mode: IsolationMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IsolationMode {
     None,
     SystemdRun,
-    Bubblewrap,
 }
 
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub bind_addr: String,
-    pub webhook_secret: Option<String>,
-    pub allow_insecure_no_secret: bool,
-    pub workspace_dir: PathBuf,
-    pub allowed_repositories: Vec<String>,
-    pub allowed_actors: Vec<String>,
-    pub allow_fork_prs: bool,
-    pub allowed_pr_author_associations: Vec<String>,
-    pub job_timeout_seconds: u64,
-    pub log_api_key: Option<String>,
-    pub isolation_mode: IsolationMode,
-    pub cpu_quota: Option<String>,
-}
-
-/// Resolves the GitHub webhook HMAC secret from either an environment variable
-/// (which may be a file path or a literal secret string) or standard fallback paths.
-pub fn resolve_webhook_secret(env_val: Option<&str>, candidate_paths: &[&Path]) -> Option<String> {
-    if let Some(raw) = env_val {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            let path = Path::new(trimmed);
-            if path.is_file() || trimmed.starts_with('/') {
-                if let Ok(contents) = fs::read_to_string(path) {
-                    let secret = contents.trim().to_string();
-                    if !secret.is_empty() {
-                        return Some(secret);
-                    }
-                }
-            } else {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-
-    for p in candidate_paths {
-        if p.exists() {
-            if let Ok(s) = fs::read_to_string(p) {
-                let trimmed = s.trim().to_string();
-                if !trimmed.is_empty() {
-                    return Some(trimmed);
-                }
-            }
-        }
-    }
-    None
-}
-
-impl Config {
+impl WorkerConfig {
     pub fn load() -> Self {
-        let bind_addr =
-            env::var("ACTION_RUNNER_BIND").unwrap_or_else(|_| "127.0.0.1:8000".to_string());
+        let controller_url = std::env::var("ACTION_RUNNER_CONTROLLER_URL")
+            .unwrap_or_else(|_| "ws://127.0.0.1:8000/api/cluster/tunnel".to_string());
 
-        let candidate_paths = [
-            Path::new("/etc/action-runner/github_webhook_secret"),
-            Path::new("/var/lib/action-runner/.github_webhook_secret"),
-            Path::new("/home/action-runner/.github_webhook_secret"),
-            Path::new("/home/lma1980/.github_webhook_secret"),
-        ];
-        let env_secret = env::var("GITHUB_WEBHOOK_SECRET").ok();
-        let webhook_secret = resolve_webhook_secret(env_secret.as_deref(), &candidate_paths);
+        let cluster_token = Self::resolve_secret("ACTION_RUNNER_CLUSTER_TOKEN")
+            .unwrap_or_else(|| "action-runner-default-cluster-token".to_string());
 
-        let allow_insecure_no_secret = env::var("ACTION_RUNNER_ALLOW_INSECURE_NO_SECRET")
-            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-            .unwrap_or(false);
+        let node_id = std::env::var("ACTION_RUNNER_NODE_ID").unwrap_or_else(|_| {
+            hostname()
+        });
 
-        let workspace_dir = env::var("ACTION_RUNNER_WORKSPACE")
+        let arch = std::env::var("ACTION_RUNNER_ARCH")
+            .unwrap_or_else(|_| std::env::consts::ARCH.to_string());
+
+        let default_tags = match arch.as_str() {
+            "riscv64" => "riscv64,native,k3,rvv,ime,bench",
+            _ => "x86_64,fmt,clippy,audit,cross,heavy",
+        };
+
+        let tags: Vec<String> = std::env::var("ACTION_RUNNER_TAGS")
+            .unwrap_or_else(|_| default_tags.to_string())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let default_slots = match arch.as_str() {
+            "riscv64" => 1,
+            _ => 4,
+        };
+
+        let max_slots = std::env::var("ACTION_RUNNER_SLOTS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default_slots);
+
+        let workspace_dir = std::env::var("ACTION_RUNNER_WORKSPACE")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                if Path::new("/var/lib/action-runner/workspace").exists() {
-                    PathBuf::from("/var/lib/action-runner/workspace")
-                } else if Path::new("/home/action-runner/ci-workspace").exists() {
-                    PathBuf::from("/home/action-runner/ci-workspace")
-                } else {
-                    PathBuf::from("/home/lma1980/repository/ci-workspace")
-                }
-            });
+            .unwrap_or_else(|_| PathBuf::from("/var/lib/action-runner/workspace"));
 
-        let allowed_repositories = env::var("ACTION_RUNNER_ALLOWED_REPOS")
-            .map(|val| {
-                val.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_else(|_| vec!["LMA1980/*".to_string()]);
+        let mut toolchains = vec!["system".to_string()];
+        if Path::new("/home/lma1980/opt/llvm-24").exists()
+            || Path::new("/opt/cross-llvm-24").exists()
+        {
+            toolchains.push("llvm-24".to_string());
+        }
+        if Path::new("/home/lma1980/opt/gcc-17-spacemit-x100").exists()
+            || Path::new("/opt/cross-gcc-17").exists()
+        {
+            toolchains.push("gcc-17-spacemit-x100".to_string());
+        } else if Path::new("/home/lma1980/opt/gcc-17").exists() {
+            toolchains.push("gcc-17".to_string());
+        }
 
-        let allowed_actors = env::var("ACTION_RUNNER_ALLOWED_ACTORS")
-            .map(|val| {
-                val.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let allow_fork_prs = env::var("ACTION_RUNNER_ALLOW_FORK_PRS")
+        let use_btrfs = std::env::var("ACTION_RUNNER_USE_BTRFS")
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-            .unwrap_or(false);
+            .unwrap_or_else(|_| Self::detect_btrfs(&workspace_dir));
 
-        let allowed_pr_author_associations = env::var("ACTION_RUNNER_ALLOWED_PR_AUTHORS")
-            .map(|val| {
-                val.split(',')
-                    .map(|s| s.trim().to_uppercase())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_else(|_| {
-                vec![
-                    "OWNER".to_string(),
-                    "MEMBER".to_string(),
-                    "COLLABORATOR".to_string(),
-                ]
-            });
-
-        let job_timeout_seconds = env::var("ACTION_RUNNER_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(600);
-
-        let log_api_key = env::var("ACTION_RUNNER_LOG_API_KEY")
-            .ok()
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty());
-
-        let isolation_mode = match env::var("ACTION_RUNNER_ISOLATION")
-            .unwrap_or_default()
+        let isolation_mode = match std::env::var("ACTION_RUNNER_ISOLATION")
+            .unwrap_or_else(|_| "none".to_string())
             .to_ascii_lowercase()
             .as_str()
         {
-            "systemd-run" | "systemd" => IsolationMode::SystemdRun,
-            "bwrap" | "bubblewrap" => IsolationMode::Bubblewrap,
+            "systemd-run" => IsolationMode::SystemdRun,
             _ => IsolationMode::None,
         };
 
-        // SpacemiT K3 16-core kernel awareness:
-        // By default, reserves 2 cores (200%) for OS, SSH recovery, and Nginx.
-        // On a 16-core reporting system, allocates up to 1400% (14 cores) for builds.
-        let cpu_quota = env::var("ACTION_RUNNER_CPU_QUOTA")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                let num_cpus = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(8);
-                if num_cpus >= 16 {
-                    Some("1400%".to_string())
-                } else if num_cpus >= 8 {
-                    Some("700%".to_string())
-                } else {
-                    Some(format!("{}00%", num_cpus.saturating_sub(1).max(1)))
-                }
-            });
+        info!(
+            node_id = %node_id,
+            arch = %arch,
+            max_slots = max_slots,
+            tags = ?tags,
+            toolchains = ?toolchains,
+            btrfs = use_btrfs,
+            "Loaded ActionRunner worker configuration"
+        );
 
         Self {
-            bind_addr,
-            webhook_secret,
-            allow_insecure_no_secret,
+            controller_url,
+            cluster_token,
+            node_id,
+            arch,
+            tags,
+            max_slots,
             workspace_dir,
-            allowed_repositories,
-            allowed_actors,
-            allow_fork_prs,
-            allowed_pr_author_associations,
-            job_timeout_seconds,
-            log_api_key,
+            toolchains,
+            use_btrfs,
             isolation_mode,
-            cpu_quota,
         }
     }
 
-    pub fn is_repo_allowed(&self, repo: &str) -> bool {
-        if !is_safe_repo_name(repo) {
-            return false;
-        }
-
-        for pattern in &self.allowed_repositories {
-            if pattern == "*" {
-                return true;
-            }
-            if let Some(prefix) = pattern.strip_suffix("/*") {
-                if let Some((owner, _)) = repo.split_once('/') {
-                    if owner.eq_ignore_ascii_case(prefix) {
-                        return true;
-                    }
-                }
-            } else if pattern.eq_ignore_ascii_case(repo) {
-                return true;
+    fn detect_btrfs(path: &Path) -> bool {
+        // Quick check via statvfs/df if path or parent is btrfs
+        if let Ok(output) = std::process::Command::new("findmnt")
+            .arg("-n")
+            .arg("-o")
+            .arg("FSTYPE")
+            .arg("-T")
+            .arg(path)
+            .output()
+        {
+            if let Ok(fs) = std::str::from_utf8(&output.stdout) {
+                return fs.trim().eq_ignore_ascii_case("btrfs");
             }
         }
         false
     }
 
-    pub fn is_actor_allowed(&self, actor: &str) -> bool {
-        if self.allowed_actors.is_empty() {
-            return true; // No restrictive actor list configured
+    fn resolve_secret(env_var: &str) -> Option<String> {
+        let val = std::env::var(env_var).ok()?.trim().to_string();
+        if val.is_empty() {
+            return None;
         }
-        self.allowed_actors
-            .iter()
-            .any(|a| a == "*" || a.eq_ignore_ascii_case(actor))
-    }
 
-    pub fn is_pr_author_allowed(&self, association: &str) -> bool {
-        self.allowed_pr_author_associations
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case(association))
+        let path = Path::new(&val);
+        if path.is_file() {
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    let secret = content.trim().to_string();
+                    if !secret.is_empty() {
+                        return Some(secret);
+                    }
+                }
+                Err(err) => {
+                    warn!("Failed to read secret file at {}: {}", path.display(), err);
+                }
+            }
+        }
+        Some(val)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_safe_repo_name() {
-        assert!(is_safe_repo_name("LMA1980/ActionRunner-rs"));
-        assert!(is_safe_repo_name("LMA1980/model-runner"));
-        assert!(is_safe_repo_name("user-name/repo.name_1"));
-
-        // Path traversal attempts
-        assert!(!is_safe_repo_name("LMA1980/../../etc"));
-        assert!(!is_safe_repo_name("../LMA1980/repo"));
-        assert!(!is_safe_repo_name("LMA1980/.."));
-        assert!(!is_safe_repo_name(".."));
-        assert!(!is_safe_repo_name("/etc/passwd"));
-        assert!(!is_safe_repo_name("repo_only"));
-        assert!(!is_safe_repo_name("a/b/c"));
-        assert!(!is_safe_repo_name("owner/repo;rm -rf"));
-        assert!(!is_safe_repo_name("owner/repo\n"));
+fn hostname() -> String {
+    if let Ok(name) = std::env::var("HOSTNAME") {
+        if !name.is_empty() {
+            return name;
+        }
     }
-
-    #[test]
-    fn test_repo_allowlist() {
-        let config = Config {
-            bind_addr: "127.0.0.1:8000".to_string(),
-            webhook_secret: Some("secret".to_string()),
-            allow_insecure_no_secret: false,
-            workspace_dir: PathBuf::from("/tmp"),
-            allowed_repositories: vec!["LMA1980/*".to_string(), "org/specific-repo".to_string()],
-            allowed_actors: vec![],
-            allow_fork_prs: false,
-            allowed_pr_author_associations: vec!["OWNER".to_string(), "MEMBER".to_string()],
-            job_timeout_seconds: 600,
-            log_api_key: None,
-            isolation_mode: IsolationMode::None,
-            cpu_quota: Some("1400%".to_string()),
-        };
-
-        assert!(config.is_repo_allowed("LMA1980/ActionRunner-rs"));
-        assert!(config.is_repo_allowed("LMA1980/model-runner"));
-        assert!(config.is_repo_allowed("lma1980/k3-core"));
-        assert!(config.is_repo_allowed("org/specific-repo"));
-
-        assert!(!config.is_repo_allowed("other-org/other-repo"));
-        assert!(!config.is_repo_allowed("LMA1980/../../etc/passwd"));
+    if let Ok(output) = std::process::Command::new("hostname").output() {
+        if let Ok(name) = std::str::from_utf8(&output.stdout) {
+            let trimmed = name.trim().to_string();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
     }
-
-    #[test]
-    fn test_pr_author_association() {
-        let config = Config {
-            bind_addr: "127.0.0.1:8000".to_string(),
-            webhook_secret: Some("secret".to_string()),
-            allow_insecure_no_secret: false,
-            workspace_dir: PathBuf::from("/tmp"),
-            allowed_repositories: vec!["*".to_string()],
-            allowed_actors: vec![],
-            allow_fork_prs: false,
-            allowed_pr_author_associations: vec![
-                "OWNER".to_string(),
-                "MEMBER".to_string(),
-                "COLLABORATOR".to_string(),
-            ],
-            job_timeout_seconds: 600,
-            log_api_key: None,
-            isolation_mode: IsolationMode::None,
-            cpu_quota: Some("1400%".to_string()),
-        };
-
-        assert!(config.is_pr_author_allowed("OWNER"));
-        assert!(config.is_pr_author_allowed("owner"));
-        assert!(config.is_pr_author_allowed("COLLABORATOR"));
-        assert!(config.is_pr_author_allowed("MEMBER"));
-
-        assert!(!config.is_pr_author_allowed("NONE"));
-        assert!(!config.is_pr_author_allowed("FIRST_TIME_CONTRIBUTOR"));
-        assert!(!config.is_pr_author_allowed("CONTRIBUTOR"));
-    }
-
-    #[test]
-    fn test_resolve_webhook_secret_from_file_and_literal() {
-        let tmp_path =
-            std::env::temp_dir().join(format!("action_runner_secret_test_{}", std::process::id()));
-        fs::write(&tmp_path, "  file-secret-value-123\n").unwrap();
-
-        // 1. Env var points to a file path -> reads file contents (not the path string)
-        let res = resolve_webhook_secret(tmp_path.to_str(), &[]);
-        assert_eq!(res.as_deref(), Some("file-secret-value-123"));
-
-        // 2. Env var points to non-existent absolute path -> falls back to candidate_paths
-        let res_fallback =
-            resolve_webhook_secret(Some("/nonexistent/path/to/secret"), &[tmp_path.as_path()]);
-        assert_eq!(res_fallback.as_deref(), Some("file-secret-value-123"));
-
-        // 3. Env var points to non-existent absolute path with no valid fallback -> returns None (not path string)
-        let res_none = resolve_webhook_secret(Some("/nonexistent/path/to/secret"), &[]);
-        assert!(res_none.is_none());
-
-        // 4. Env var is a literal secret string -> returns trimmed literal
-        let res_literal = resolve_webhook_secret(Some("  literal-secret-abc  "), &[]);
-        assert_eq!(res_literal.as_deref(), Some("literal-secret-abc"));
-
-        let _ = fs::remove_file(&tmp_path);
-    }
+    "worker-node".to_string()
 }
