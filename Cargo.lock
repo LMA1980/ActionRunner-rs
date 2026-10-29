@@ -26,6 +26,7 @@ dependencies = [
 [[package]]
 name = "action-runner-ipc"
 version = "0.1.0"
+source = "git+https://github.com/LMA1980/ActionRunner-ipc.git?branch=feat%2Fissue-82-exclusive-stage-isolation#10f1855745a7a4983ef3d4011b3847c909a49a5a"
 dependencies = [
  "arrow",
  "bytes",

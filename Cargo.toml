@@ -7,7 +7,7 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/LMA1980/ActionRunner-rs"
 
 [dependencies]
-action-runner-ipc = { git = "https://github.com/LMA1980/ActionRunner-ipc.git", branch = "feat/stage-pid-tracking-and-queue-fairness" }
+action-runner-ipc = { git = "https://github.com/LMA1980/ActionRunner-ipc.git", branch = "feat/issue-82-exclusive-stage-isolation" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "sync", "time", "fs", "io-util", "signal"] }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
@@ -24,6 +24,3 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-
-[patch."https://github.com/LMA1980/ActionRunner-ipc.git"]
-action-runner-ipc = { path = "../ActionRunner-ipc" }
