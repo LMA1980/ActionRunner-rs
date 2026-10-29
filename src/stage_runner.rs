@@ -11,8 +11,123 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{error, info};
 
-use crate::config::{IsolationMode, WorkerConfig};
+use crate::config::{is_safe_repo_name, IsolationMode, WorkerConfig};
 use action_runner_ipc::StageDispatchTask;
+
+/// Validates that an identifier (job_id, stage_id) consists strictly of safe characters
+/// and contains no path traversal sequences or directory separators.
+pub fn is_safe_identifier(id: &str) -> bool {
+    let id = id.trim();
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || id.contains('\0')
+    {
+        return false;
+    }
+    id.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+/// Sanitizes an input string to be safely used as a single path component.
+pub fn sanitize_path_segment(input: &str) -> String {
+    let sanitized: String = input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Validates that `rel_working_dir` is a strictly relative sub-path within `stage_dir`,
+/// containing no parent traversals ('..'), root components, or symlink escapes.
+pub fn validate_and_resolve_working_dir(
+    stage_dir: &Path,
+    rel_working_dir: Option<&str>,
+) -> Result<PathBuf, String> {
+    let rel = match rel_working_dir {
+        None => return Ok(stage_dir.to_path_buf()),
+        Some(s) => s.trim(),
+    };
+
+    if rel.is_empty() || rel == "." || rel == "./" {
+        return Ok(stage_dir.to_path_buf());
+    }
+
+    if rel.contains('\0') {
+        return Err("Invalid working_dir: contains null byte".to_string());
+    }
+
+    let rel_path = Path::new(rel);
+
+    // Reject absolute paths
+    if rel_path.is_absolute() || rel.starts_with('/') || rel.starts_with('\\') {
+        return Err(format!(
+            "Invalid working_dir '{}': Absolute paths are forbidden",
+            rel
+        ));
+    }
+
+    // Reject parent traversal (..) and root components
+    for comp in rel_path.components() {
+        match comp {
+            std::path::Component::Normal(_) => {}
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(format!(
+                    "Invalid working_dir '{}': Path traversal ('..') / parent directory is forbidden",
+                    rel
+                ));
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(format!(
+                    "Invalid working_dir '{}': root or prefix components are forbidden",
+                    rel
+                ));
+            }
+        }
+    }
+
+    let resolved = stage_dir.join(rel_path);
+
+    // Lexical boundary check
+    if !resolved.starts_with(stage_dir) {
+        return Err(format!(
+            "Invalid working_dir '{}': resolved path '{}' escapes stage directory '{}'",
+            rel,
+            resolved.display(),
+            stage_dir.display()
+        ));
+    }
+
+    // Verify canonical path against symlink escape if both exist
+    if stage_dir.exists() && resolved.exists() {
+        if let (Ok(real_stage), Ok(real_resolved)) =
+            (stage_dir.canonicalize(), resolved.canonicalize())
+        {
+            if !real_resolved.starts_with(&real_stage) {
+                return Err(format!(
+                    "Invalid working_dir '{}': canonical path '{}' escapes canonical stage directory '{}'",
+                    rel,
+                    real_resolved.display(),
+                    real_stage.display()
+                ));
+            }
+        }
+    }
+
+    Ok(resolved)
+}
 
 pub struct StageRunner {
     config: WorkerConfig,
@@ -66,12 +181,66 @@ impl StageRunner {
             "Executing stage on worker node"
         );
 
+        // Validate repo_name against path traversal / invalid format
+        if !is_safe_repo_name(&task.repo_name) {
+            let err_msg = format!(
+                "Stage execution rejected: invalid or unsafe repository name '{}'",
+                task.repo_name
+            );
+            error!("{}", err_msg);
+            return StageExecutionResult {
+                exit_code: -1,
+                duration_secs: 0,
+                pid: 0,
+                error_message: Some(err_msg),
+            };
+        }
+
+        // Validate job_id and stage_id against path traversal
+        if !is_safe_identifier(&task.job_id) || !is_safe_identifier(&task.stage_id) {
+            let err_msg = format!(
+                "Stage execution rejected: unsafe job_id '{}' or stage_id '{}'",
+                task.job_id, task.stage_id
+            );
+            error!("{}", err_msg);
+            return StageExecutionResult {
+                exit_code: -1,
+                duration_secs: 0,
+                pid: 0,
+                error_message: Some(err_msg),
+            };
+        }
+
+        // Validate working_dir upfront (before workspace creation)
+        if let Some(rel) = task.working_dir.as_deref() {
+            let dummy = Path::new("/tmp/stage_check");
+            if let Err(err_msg) = validate_and_resolve_working_dir(dummy, Some(rel)) {
+                error!("{}", err_msg);
+                return StageExecutionResult {
+                    exit_code: -1,
+                    duration_secs: 0,
+                    pid: 0,
+                    error_message: Some(err_msg),
+                };
+            }
+        }
+
         let stage_dir = self.prepare_stage_workspace(task, &log_tx).await;
 
-        let working_dir = match &task.working_dir {
-            Some(rel) => stage_dir.join(rel),
-            None => stage_dir.clone(),
-        };
+        let working_dir =
+            match validate_and_resolve_working_dir(&stage_dir, task.working_dir.as_deref()) {
+                Ok(p) => p,
+                Err(err_msg) => {
+                    error!("{}", err_msg);
+                    self.cleanup_stage_workspace(&stage_dir).await;
+                    return StageExecutionResult {
+                        exit_code: -1,
+                        duration_secs: 0,
+                        pid: 0,
+                        error_message: Some(err_msg),
+                    };
+                }
+            };
 
         // Construct Command
         let mut cmd = match self.config.isolation_mode {
@@ -375,13 +544,18 @@ impl StageRunner {
         task: &StageDispatchTask,
         log_tx: &mpsc::Sender<Vec<u8>>,
     ) -> PathBuf {
+        let safe_job = sanitize_path_segment(&task.job_id);
+        let safe_stage = sanitize_path_segment(&task.stage_id);
+        let stage_folder_name = format!("{}_{}", safe_job, safe_stage);
+
+        let stages_dir = self.config.workspace_dir.join("stages");
+        let stage_dir = stages_dir.join(&stage_folder_name);
+
         let repo_cache = self
             .config
             .workspace_dir
             .join("cache")
             .join(&task.repo_name);
-        let stages_dir = self.config.workspace_dir.join("stages");
-        let stage_dir = stages_dir.join(format!("{}_{}", task.job_id, task.stage_id));
 
         let emit_git_log = |content: String| {
             let entry = LogEntry {
@@ -515,6 +689,16 @@ impl StageRunner {
     }
 
     async fn cleanup_stage_workspace(&self, stage_dir: &Path) {
+        let stages_dir = self.config.workspace_dir.join("stages");
+        if !stage_dir.starts_with(&stages_dir) || stage_dir == stages_dir {
+            error!(
+                "Refusing to clean up stage workspace at '{}': path is outside stages directory '{}'",
+                stage_dir.display(),
+                stages_dir.display()
+            );
+            return;
+        }
+
         if self.config.use_btrfs {
             let res = Command::new("btrfs")
                 .arg("subvolume")
@@ -527,5 +711,143 @@ impl StageRunner {
             }
         }
         let _ = tokio::fs::remove_dir_all(stage_dir).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_safe_identifier() {
+        assert!(is_safe_identifier("job-123"));
+        assert!(is_safe_identifier("stage_build"));
+        assert!(is_safe_identifier("bench.run-1"));
+        assert!(!is_safe_identifier(""));
+        assert!(!is_safe_identifier("../job-123"));
+        assert!(!is_safe_identifier("job/123"));
+        assert!(!is_safe_identifier("job\\123"));
+        assert!(!is_safe_identifier("job..123"));
+    }
+
+    #[test]
+    fn test_sanitize_path_segment() {
+        assert_eq!(sanitize_path_segment("job-123_abc"), "job-123_abc");
+        assert_eq!(
+            sanitize_path_segment("../../etc/passwd"),
+            "______etc_passwd"
+        );
+        assert_eq!(sanitize_path_segment(""), "unknown");
+    }
+
+    #[test]
+    fn test_validate_and_resolve_working_dir_valid() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stage_dir = temp_dir.path();
+        let sub_dir = stage_dir.join("src");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        // None -> stage_dir
+        assert_eq!(
+            validate_and_resolve_working_dir(stage_dir, None).unwrap(),
+            stage_dir.to_path_buf()
+        );
+
+        // Empty or "." -> stage_dir
+        assert_eq!(
+            validate_and_resolve_working_dir(stage_dir, Some("")).unwrap(),
+            stage_dir.to_path_buf()
+        );
+        assert_eq!(
+            validate_and_resolve_working_dir(stage_dir, Some(".")).unwrap(),
+            stage_dir.to_path_buf()
+        );
+
+        // Valid relative subpath
+        assert_eq!(
+            validate_and_resolve_working_dir(stage_dir, Some("src")).unwrap(),
+            sub_dir
+        );
+    }
+
+    #[test]
+    fn test_validate_and_resolve_working_dir_reject_traversal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stage_dir = temp_dir.path();
+
+        // Parent traversal
+        assert!(validate_and_resolve_working_dir(stage_dir, Some("..")).is_err());
+        assert!(validate_and_resolve_working_dir(stage_dir, Some("../../etc")).is_err());
+        assert!(validate_and_resolve_working_dir(stage_dir, Some("src/../../etc")).is_err());
+
+        // Absolute path
+        assert!(validate_and_resolve_working_dir(stage_dir, Some("/etc/passwd")).is_err());
+        assert!(validate_and_resolve_working_dir(stage_dir, Some("/tmp")).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_stage_rejects_path_traversal() {
+        let config = WorkerConfig {
+            controller_url: "ws://127.0.0.1:8000".to_string(),
+            cluster_token: "test".to_string(),
+            node_id: "test".to_string(),
+            arch: "x86_64".to_string(),
+            tags: vec![],
+            max_slots: 1,
+            workspace_dir: tempfile::tempdir().unwrap().path().to_path_buf(),
+            toolchains: vec![],
+            use_btrfs: false,
+            isolation_mode: IsolationMode::None,
+        };
+        let runner = StageRunner::new(config);
+        let (tx, _rx) = mpsc::channel(10);
+
+        // Malicious repo_name
+        let bad_repo_task = StageDispatchTask {
+            job_id: "j1".into(),
+            stage_id: "s1".into(),
+            stage_name: "test".into(),
+            repo_name: "../../etc/passwd".into(),
+            clone_url: "".into(),
+            commit_sha: "head".into(),
+            command: "echo test".into(),
+            working_dir: None,
+            env_vars: vec![],
+            timeout_seconds: 5,
+            threads: 1,
+            toolchain: None,
+            exclusive: false,
+        };
+        let res = runner.run_stage(&bad_repo_task, tx.clone(), None).await;
+        assert_eq!(res.exit_code, -1);
+        assert!(res
+            .error_message
+            .unwrap()
+            .contains("invalid or unsafe repository name"));
+
+        // Malicious working_dir
+        let bad_working_dir_task = StageDispatchTask {
+            job_id: "j1".into(),
+            stage_id: "s1".into(),
+            stage_name: "test".into(),
+            repo_name: "LMA1980/test-repo".into(),
+            clone_url: "".into(),
+            commit_sha: "head".into(),
+            command: "echo test".into(),
+            working_dir: Some("/etc".into()),
+            env_vars: vec![],
+            timeout_seconds: 5,
+            threads: 1,
+            toolchain: None,
+            exclusive: false,
+        };
+        let res2 = runner
+            .run_stage(&bad_working_dir_task, tx.clone(), None)
+            .await;
+        assert_eq!(res2.exit_code, -1);
+        assert!(res2
+            .error_message
+            .unwrap()
+            .contains("Absolute paths are forbidden"));
     }
 }
