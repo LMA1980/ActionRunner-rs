@@ -46,7 +46,7 @@ pub struct WorkerAgent {
     execution_gate: Arc<Semaphore>,
     active_slots: Arc<AtomicU32>,
     active_stages: Arc<RwLock<Vec<String>>>,
-    active_processes: Arc<RwLock<HashMap<String, u32>>>,
+    active_processes: Arc<RwLock<HashMap<(String, String), u32>>>,
 }
 
 impl WorkerAgent {
@@ -278,10 +278,13 @@ impl WorkerAgent {
 
                                             tokio::spawn(async move {
                                                 if let Ok(pid) = started_rx.await {
-                                                    active_proc_reg
-                                                        .write()
-                                                        .await
-                                                        .insert(stage_id_started.clone(), pid);
+                                                    active_proc_reg.write().await.insert(
+                                                        (
+                                                            job_id_started.clone(),
+                                                            stage_id_started.clone(),
+                                                        ),
+                                                        pid,
+                                                    );
                                                     let started_event = StageStarted {
                                                         job_id: job_id_started,
                                                         stage_id: stage_id_started,
@@ -378,7 +381,7 @@ impl WorkerAgent {
                                                 active_processes
                                                     .write()
                                                     .await
-                                                    .remove(&task.stage_id);
+                                                    .remove(&(task.job_id.clone(), task.stage_id.clone()));
 
                                                 let report = StageCompletionReport {
                                                     job_id: task.job_id.clone(),
@@ -421,6 +424,7 @@ impl WorkerAgent {
                                         fory.deserialize::<StageCancelTask>(payload)
                                     {
                                         info!(
+                                            job_id = %cancel_task.job_id,
                                             stage = %cancel_task.stage_id,
                                             reason = %cancel_task.reason,
                                             "Worker received StageCancelTask; checking for active process"
@@ -429,9 +433,13 @@ impl WorkerAgent {
                                             .active_processes
                                             .write()
                                             .await
-                                            .remove(&cancel_task.stage_id);
+                                            .remove(&(
+                                                cancel_task.job_id.clone(),
+                                                cancel_task.stage_id.clone(),
+                                            ));
                                         if let Some(pid) = maybe_pid {
                                             info!(
+                                                job_id = %cancel_task.job_id,
                                                 stage = %cancel_task.stage_id,
                                                 pid = pid,
                                                 "Terminating active process group via SIGTERM"
