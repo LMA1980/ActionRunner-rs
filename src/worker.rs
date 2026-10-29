@@ -7,7 +7,7 @@ use action_runner_ipc::{
 };
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,17 +47,65 @@ pub struct WorkerAgent {
     active_slots: Arc<AtomicU32>,
     active_stages: Arc<RwLock<Vec<String>>>,
     active_processes: Arc<RwLock<HashMap<(String, String), u32>>>,
+    cancelled_stages: Arc<RwLock<HashSet<(String, String)>>>,
 }
 
 impl WorkerAgent {
     pub fn new(config: WorkerConfig) -> Self {
+        let total_slots = config.max_slots.max(1);
         Self {
             config,
-            // Strictly 1 action (stage) may execute at a time on a worker node
-            execution_gate: Arc::new(Semaphore::new(1)),
+            execution_gate: Arc::new(Semaphore::new(total_slots as usize)),
             active_slots: Arc::new(AtomicU32::new(0)),
             active_stages: Arc::new(RwLock::new(Vec::new())),
             active_processes: Arc::new(RwLock::new(HashMap::new())),
+            cancelled_stages: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn execution_gate(&self) -> Arc<Semaphore> {
+        self.execution_gate.clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn available_permits(&self) -> usize {
+        self.execution_gate.available_permits()
+    }
+
+    #[allow(dead_code)]
+    pub fn active_slots(&self) -> u32 {
+        self.active_slots.load(Ordering::Relaxed)
+    }
+
+    #[allow(dead_code)]
+    pub async fn acquire_permit(
+        &self,
+        exclusive: bool,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
+        let total_slots = self.config.max_slots.max(1);
+        if exclusive {
+            self.execution_gate
+                .clone()
+                .acquire_many_owned(total_slots)
+                .await
+        } else {
+            self.execution_gate.clone().acquire_owned().await
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn try_acquire_permit(
+        &self,
+        exclusive: bool,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::TryAcquireError> {
+        let total_slots = self.config.max_slots.max(1);
+        if exclusive {
+            self.execution_gate
+                .clone()
+                .try_acquire_many_owned(total_slots)
+        } else {
+            self.execution_gate.clone().try_acquire_owned()
         }
     }
 
@@ -259,77 +307,166 @@ impl WorkerAgent {
                                 if hdr.msg_type == MSG_TYPE_STAGE_DISPATCH {
                                     match fory.deserialize::<StageDispatchTask>(payload) {
                                         Ok(task) => {
-                                            info!(stage = %task.stage_id, "Worker successfully deserialized StageDispatchTask");
+                                            info!(
+                                                job_id = %task.job_id,
+                                                stage = %task.stage_id,
+                                                exclusive = task.exclusive,
+                                                "Worker successfully deserialized StageDispatchTask"
+                                            );
                                             let runner = stage_runner.clone();
                                             let gate = self.execution_gate.clone();
                                             let out_tx = outbound_tx.clone();
                                             let active_counter = self.active_slots.clone();
                                             let active_stages = self.active_stages.clone();
                                             let active_processes = self.active_processes.clone();
+                                            let cancelled_stages = self.cancelled_stages.clone();
+                                            let total_slots = self.config.max_slots.max(1);
+                                            let node_id = self.config.node_id.clone();
                                             let comp_fory = create_fory_runtime()?;
 
-                                            let (started_tx, started_rx) =
-                                                tokio::sync::oneshot::channel::<u32>();
-                                            let node_id_started = self.config.node_id.clone();
-                                            let out_tx_started = outbound_tx.clone();
-                                            let stage_id_started = task.stage_id.clone();
-                                            let job_id_started = task.job_id.clone();
-                                            let active_proc_reg = active_processes.clone();
-
                                             tokio::spawn(async move {
-                                                if let Ok(pid) = started_rx.await {
-                                                    active_proc_reg.write().await.insert(
-                                                        (
-                                                            job_id_started.clone(),
-                                                            stage_id_started.clone(),
-                                                        ),
-                                                        pid,
+                                                let permits_to_acquire = if task.exclusive {
+                                                    total_slots
+                                                } else {
+                                                    1
+                                                };
+
+                                                info!(
+                                                    job_id = %task.job_id,
+                                                    stage = %task.stage_id,
+                                                    exclusive = task.exclusive,
+                                                    permits = permits_to_acquire,
+                                                    total_slots = total_slots,
+                                                    "Awaiting execution gate permit(s) for stage"
+                                                );
+
+                                                let permit_res = if task.exclusive {
+                                                    gate.clone().acquire_many_owned(total_slots).await
+                                                } else {
+                                                    gate.clone().acquire_owned().await
+                                                };
+
+                                                let _permit = match permit_res {
+                                                    Ok(p) => p,
+                                                    Err(e) => {
+                                                        tracing::error!(
+                                                            job_id = %task.job_id,
+                                                            stage = %task.stage_id,
+                                                            error = %e,
+                                                            "Execution gate closed; aborting stage dispatch"
+                                                        );
+                                                        return;
+                                                    }
+                                                };
+
+                                                // Check if cancelled while waiting for permit
+                                                let is_cancelled = {
+                                                    let mut set = cancelled_stages.write().await;
+                                                    set.remove(&(task.job_id.clone(), task.stage_id.clone()))
+                                                };
+
+                                                if is_cancelled {
+                                                    info!(
+                                                        job_id = %task.job_id,
+                                                        stage = %task.stage_id,
+                                                        "Stage was cancelled while queued in execution gate; releasing permit immediately"
                                                     );
-                                                    let started_event = StageStarted {
-                                                        job_id: job_id_started,
-                                                        stage_id: stage_id_started,
-                                                        node_id: node_id_started,
-                                                        pid,
-                                                        started_at_epoch_ms: Utc::now()
-                                                            .timestamp_millis()
-                                                            as u64,
+                                                    let report = StageCompletionReport {
+                                                        job_id: task.job_id.clone(),
+                                                        stage_id: task.stage_id.clone(),
+                                                        exit_code: 130, // 128 + SIGINT
+                                                        duration_secs: 0,
+                                                        error_message: Some(
+                                                            "Stage cancelled before permit acquisition"
+                                                                .to_string(),
+                                                        ),
                                                     };
-                                                    if let Ok(sfory) = create_fory_runtime() {
-                                                        if let Ok(spayload) =
-                                                            sfory.serialize(&started_event)
-                                                        {
-                                                            let shdr = IpcHeader::new(
-                                                                MSG_TYPE_STAGE_STARTED,
-                                                                spayload.len() as u32,
-                                                                0,
-                                                                1001,
-                                                            );
-                                                            let mut sframe = Vec::with_capacity(
-                                                                action_runner_ipc::HEADER_SIZE
-                                                                    + spayload.len(),
-                                                            );
-                                                            sframe.extend_from_slice(
-                                                                zerocopy::IntoBytes::as_bytes(
-                                                                    &shdr,
-                                                                ),
-                                                            );
-                                                            sframe.extend_from_slice(&spayload);
-                                                            let _ = out_tx_started
-                                                                .send(sframe)
-                                                                .await;
+                                                    if let Ok(comp_payload) =
+                                                        comp_fory.serialize(&report)
+                                                    {
+                                                        let comp_hdr = IpcHeader::new(
+                                                            MSG_TYPE_STAGE_COMPLETION,
+                                                            comp_payload.len() as u32,
+                                                            0,
+                                                            999,
+                                                        );
+                                                        let mut frame = Vec::with_capacity(
+                                                            action_runner_ipc::HEADER_SIZE
+                                                                + comp_payload.len(),
+                                                        );
+                                                        frame.extend_from_slice(
+                                                            zerocopy::IntoBytes::as_bytes(&comp_hdr),
+                                                        );
+                                                        frame.extend_from_slice(&comp_payload);
+                                                        let _ = out_tx.send(frame).await;
+                                                    }
+                                                    return;
+                                                }
+
+                                                info!(
+                                                    job_id = %task.job_id,
+                                                    stage = %task.stage_id,
+                                                    exclusive = task.exclusive,
+                                                    "Acquired execution gate permit(s); launching stage"
+                                                );
+
+                                                active_counter
+                                                    .fetch_add(permits_to_acquire, Ordering::Relaxed);
+                                                active_stages.write().await.push(task.stage_id.clone());
+
+                                                let (started_tx, started_rx) =
+                                                    tokio::sync::oneshot::channel::<u32>();
+                                                let node_id_started = node_id.clone();
+                                                let out_tx_started = out_tx.clone();
+                                                let stage_id_started = task.stage_id.clone();
+                                                let job_id_started = task.job_id.clone();
+                                                let active_proc_reg = active_processes.clone();
+
+                                                tokio::spawn(async move {
+                                                    if let Ok(pid) = started_rx.await {
+                                                        active_proc_reg.write().await.insert(
+                                                            (
+                                                                job_id_started.clone(),
+                                                                stage_id_started.clone(),
+                                                            ),
+                                                            pid,
+                                                        );
+                                                        let started_event = StageStarted {
+                                                            job_id: job_id_started,
+                                                            stage_id: stage_id_started,
+                                                            node_id: node_id_started,
+                                                            pid,
+                                                            started_at_epoch_ms: Utc::now()
+                                                                .timestamp_millis()
+                                                                as u64,
+                                                        };
+                                                        if let Ok(sfory) = create_fory_runtime() {
+                                                            if let Ok(spayload) =
+                                                                sfory.serialize(&started_event)
+                                                            {
+                                                                let shdr = IpcHeader::new(
+                                                                    MSG_TYPE_STAGE_STARTED,
+                                                                    spayload.len() as u32,
+                                                                    0,
+                                                                    1001,
+                                                                );
+                                                                let mut sframe = Vec::with_capacity(
+                                                                    action_runner_ipc::HEADER_SIZE
+                                                                        + spayload.len(),
+                                                                );
+                                                                sframe.extend_from_slice(
+                                                                    zerocopy::IntoBytes::as_bytes(
+                                                                        &shdr,
+                                                                    ),
+                                                                );
+                                                                sframe.extend_from_slice(&spayload);
+                                                                let _ = out_tx_started
+                                                                    .send(sframe)
+                                                                    .await;
+                                                            }
                                                         }
                                                     }
-                                                }
-                                            });
-
-                                            tokio::spawn(async move {
-                                                // Enforce single-action execution per node at the worker level
-                                                let _permit = gate.acquire_owned().await;
-                                                active_counter.fetch_add(1, Ordering::Relaxed);
-                                                active_stages
-                                                    .write()
-                                                    .await
-                                                    .push(task.stage_id.clone());
+                                                });
 
                                                 let (log_batch_tx, mut log_batch_rx) =
                                                     mpsc::channel::<Vec<u8>>(32);
@@ -373,7 +510,8 @@ impl WorkerAgent {
                                                     .await;
                                                 let _ = log_forwarder.await;
 
-                                                active_counter.fetch_sub(1, Ordering::Relaxed);
+                                                active_counter
+                                                    .fetch_sub(permits_to_acquire, Ordering::Relaxed);
                                                 active_stages
                                                     .write()
                                                     .await
@@ -429,6 +567,12 @@ impl WorkerAgent {
                                             reason = %cancel_task.reason,
                                             "Worker received StageCancelTask; checking for active process"
                                         );
+                                        // Register cancellation in case stage is queued waiting for permits
+                                        self.cancelled_stages.write().await.insert((
+                                            cancel_task.job_id.clone(),
+                                            cancel_task.stage_id.clone(),
+                                        ));
+
                                         let maybe_pid = self
                                             .active_processes
                                             .write()
@@ -452,6 +596,7 @@ impl WorkerAgent {
                                         }
                                     }
                                 }
+
                             }
                             Err(e) => {
                                 tracing::error!(error = ?e, "Worker failed to parse IpcHeader");

@@ -46,8 +46,11 @@ impl WorkerConfig {
             .filter(|s| !s.is_empty())
             .collect();
 
-        // Each worker node executes strictly 1 action (stage) at a time.
-        let max_slots = 1;
+        let max_slots = std::env::var("ACTION_RUNNER_MAX_SLOTS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(1)
+            .max(1);
 
         let workspace_dir = std::env::var("ACTION_RUNNER_WORKSPACE")
             .map(PathBuf::from)
@@ -101,7 +104,7 @@ impl WorkerConfig {
             tags = ?cfg.tags,
             toolchains = ?cfg.toolchains,
             btrfs = cfg.use_btrfs,
-            "Loaded ActionRunner worker configuration (strictly 1 action slot per node)"
+            "Loaded ActionRunner worker configuration"
         );
 
         cfg
@@ -145,28 +148,68 @@ impl WorkerConfig {
         false
     }
 
-    fn resolve_secret(env_var: &str) -> Option<String> {
-        let val = std::env::var(env_var).ok()?.trim().to_string();
+    pub fn resolve_secret(env_var: &str) -> Option<String> {
+        let val = std::env::var(env_var).ok()?;
+        Self::resolve_secret_value(&val)
+    }
+
+    pub fn resolve_secret_value(val: &str) -> Option<String> {
+        let val = val.trim();
         if val.is_empty() {
             return None;
         }
 
-        let path = Path::new(&val);
+        let is_path = val.starts_with('/')
+            || val.starts_with("./")
+            || val.starts_with("../")
+            || val.contains('/')
+            || val.contains('\\');
+
+        let path = Path::new(val);
         if path.is_file() {
             match std::fs::read_to_string(path) {
                 Ok(content) => {
                     let secret = content.trim().to_string();
-                    if !secret.is_empty() {
-                        return Some(secret);
+                    if secret.is_empty() {
+                        warn!("Secret file at {} is empty", path.display());
+                        None
+                    } else {
+                        info!("Loaded secret from {}", path.display());
+                        Some(secret)
                     }
                 }
                 Err(err) => {
                     warn!("Failed to read secret file at {}: {}", path.display(), err);
+                    None
                 }
             }
+        } else if is_path {
+            warn!(
+                "Secret path '{}' does not exist or is not a readable file; failing closed",
+                val
+            );
+            None
+        } else {
+            Some(val.to_string())
         }
-        Some(val)
     }
+}
+
+pub fn is_safe_repo_name(repo: &str) -> bool {
+    let parts: Vec<&str> = repo.split('/').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    let owner = parts[0];
+    let name = parts[1];
+    if owner.is_empty() || name.is_empty() {
+        return false;
+    }
+    if owner.contains("..") || name.contains("..") {
+        return false;
+    }
+    let is_valid_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.';
+    owner.chars().all(is_valid_char) && name.chars().all(is_valid_char)
 }
 
 fn hostname() -> String {
@@ -184,4 +227,87 @@ fn hostname() -> String {
         }
     }
     "worker-node".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_secret_value_literal() {
+        let literal = "my_literal_token_12345";
+        assert_eq!(
+            WorkerConfig::resolve_secret_value(literal),
+            Some(literal.to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_secret_value_from_valid_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("secret.key");
+        std::fs::write(&file_path, "  my-secret-token \n\t").unwrap();
+
+        assert_eq!(
+            WorkerConfig::resolve_secret_value(file_path.to_str().unwrap()),
+            Some("my-secret-token".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_secret_value_missing_path_fail_closed() {
+        assert_eq!(
+            WorkerConfig::resolve_secret_value("/nonexistent/cluster.token"),
+            None,
+            "Missing absolute secret file must fail closed to None"
+        );
+        assert_eq!(
+            WorkerConfig::resolve_secret_value("./missing_cluster.token"),
+            None,
+            "Missing relative secret file must fail closed to None"
+        );
+        assert_eq!(
+            WorkerConfig::resolve_secret_value("../missing_cluster.token"),
+            None,
+            "Parent traversal secret path must fail closed to None"
+        );
+    }
+
+    #[test]
+    fn test_resolve_secret_value_empty_file_fail_closed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("empty.key");
+        std::fs::write(&file_path, "   \n\t").unwrap();
+
+        assert_eq!(
+            WorkerConfig::resolve_secret_value(file_path.to_str().unwrap()),
+            None,
+            "Empty secret file must fail closed to None"
+        );
+    }
+
+    #[test]
+    fn test_resolve_secret_env_var_fail_closed() {
+        let var_name = "TEST_WORKER_SECRET_FAIL_CLOSED_VAR";
+        std::env::set_var(var_name, "/nonexistent/path/to/token.secret");
+        assert_eq!(
+            WorkerConfig::resolve_secret(var_name),
+            None,
+            "Environment variable pointing to nonexistent path must fail closed"
+        );
+        std::env::remove_var(var_name);
+    }
+
+    #[test]
+    fn test_is_safe_repo_name() {
+        assert!(is_safe_repo_name("LMA1980/model-runner"));
+        assert!(is_safe_repo_name("owner-123/repo_456.test"));
+        assert!(!is_safe_repo_name(""));
+        assert!(!is_safe_repo_name("/etc/passwd"));
+        assert!(!is_safe_repo_name("../etc/passwd"));
+        assert!(!is_safe_repo_name("LMA1980/../passwd"));
+        assert!(!is_safe_repo_name("LMA1980"));
+        assert!(!is_safe_repo_name("LMA1980/repo/extra"));
+        assert!(!is_safe_repo_name("LMA1980/repo;rm -rf /"));
+    }
 }
