@@ -9,7 +9,8 @@ fn test_worker_config_defaults() {
     let config = WorkerConfig::load();
     assert!(!config.node_id.is_empty());
     assert!(!config.arch.is_empty());
-    assert!(config.max_slots >= 1);
+    assert_eq!(config.max_slots, 1);
+    assert!(config.max_threads() >= 1);
     assert!(!config.tags.is_empty());
 }
 
@@ -21,7 +22,7 @@ async fn test_stage_runner_execution_and_log_batching() {
         node_id: "test-worker".to_string(),
         arch: "x86_64".to_string(),
         tags: vec!["test".to_string()],
-        max_slots: 2,
+        max_slots: 1,
         workspace_dir: PathBuf::from("/tmp/action-runner-test-workspace"),
         toolchains: vec!["system".to_string()],
         use_btrfs: false,

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::time::sleep;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -43,6 +43,7 @@ async fn wait_for_shutdown_signal() {
 
 pub struct WorkerAgent {
     config: WorkerConfig,
+    execution_gate: Arc<Semaphore>,
     active_slots: Arc<AtomicU32>,
     active_stages: Arc<RwLock<Vec<String>>>,
     active_processes: Arc<RwLock<HashMap<String, u32>>>,
@@ -52,6 +53,8 @@ impl WorkerAgent {
     pub fn new(config: WorkerConfig) -> Self {
         Self {
             config,
+            // Strictly 1 action (stage) may execute at a time on a worker node
+            execution_gate: Arc::new(Semaphore::new(1)),
             active_slots: Arc::new(AtomicU32::new(0)),
             active_stages: Arc::new(RwLock::new(Vec::new())),
             active_processes: Arc::new(RwLock::new(HashMap::new())),
@@ -205,10 +208,11 @@ impl WorkerAgent {
                     if *shutdown_watch.borrow() {
                         info!("Received shutdown signal; notifying coordinator before disconnecting");
                         for pid in self.active_processes.read().await.values() {
-                            info!(pid = pid, "Terminating active process before worker disconnect");
+                            info!(pid = pid, "Terminating active process group before worker disconnect");
                             #[cfg(unix)]
                             unsafe {
-                                libc::kill(*pid as i32, libc::SIGTERM);
+                                let _ = libc::kill(-(*pid as i32), libc::SIGTERM);
+                                let _ = libc::kill(*pid as i32, libc::SIGTERM);
                             }
                         }
                         let interrupted = self.active_stages.read().await.clone();
@@ -257,14 +261,12 @@ impl WorkerAgent {
                                         Ok(task) => {
                                             info!(stage = %task.stage_id, "Worker successfully deserialized StageDispatchTask");
                                             let runner = stage_runner.clone();
+                                            let gate = self.execution_gate.clone();
                                             let out_tx = outbound_tx.clone();
                                             let active_counter = self.active_slots.clone();
                                             let active_stages = self.active_stages.clone();
                                             let active_processes = self.active_processes.clone();
                                             let comp_fory = create_fory_runtime()?;
-
-                                            active_counter.fetch_add(1, Ordering::Relaxed);
-                                            active_stages.write().await.push(task.stage_id.clone());
 
                                             let (started_tx, started_rx) =
                                                 tokio::sync::oneshot::channel::<u32>();
@@ -318,6 +320,14 @@ impl WorkerAgent {
                                             });
 
                                             tokio::spawn(async move {
+                                                // Enforce single-action execution per node at the worker level
+                                                let _permit = gate.acquire_owned().await;
+                                                active_counter.fetch_add(1, Ordering::Relaxed);
+                                                active_stages
+                                                    .write()
+                                                    .await
+                                                    .push(task.stage_id.clone());
+
                                                 let (log_batch_tx, mut log_batch_rx) =
                                                     mpsc::channel::<Vec<u8>>(32);
 
@@ -424,11 +434,12 @@ impl WorkerAgent {
                                             info!(
                                                 stage = %cancel_task.stage_id,
                                                 pid = pid,
-                                                "Terminating active process via SIGTERM"
+                                                "Terminating active process group via SIGTERM"
                                             );
                                             #[cfg(unix)]
                                             unsafe {
-                                                libc::kill(pid as i32, libc::SIGTERM);
+                                                let _ = libc::kill(-(pid as i32), libc::SIGTERM);
+                                                let _ = libc::kill(pid as i32, libc::SIGTERM);
                                             }
                                         }
                                     }
