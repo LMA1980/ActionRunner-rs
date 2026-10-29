@@ -46,15 +46,8 @@ impl WorkerConfig {
             .filter(|s| !s.is_empty())
             .collect();
 
-        let default_slots = match arch.as_str() {
-            "riscv64" => 1,
-            _ => 4,
-        };
-
-        let max_slots = std::env::var("ACTION_RUNNER_SLOTS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(default_slots);
+        // Each worker node executes strictly 1 action (stage) at a time.
+        let max_slots = 1;
 
         let workspace_dir = std::env::var("ACTION_RUNNER_WORKSPACE")
             .map(PathBuf::from)
@@ -87,17 +80,7 @@ impl WorkerConfig {
             _ => IsolationMode::None,
         };
 
-        info!(
-            node_id = %node_id,
-            arch = %arch,
-            max_slots = max_slots,
-            tags = ?tags,
-            toolchains = ?toolchains,
-            btrfs = use_btrfs,
-            "Loaded ActionRunner worker configuration"
-        );
-
-        Self {
+        let cfg = Self {
             controller_url,
             cluster_token,
             node_id,
@@ -108,7 +91,41 @@ impl WorkerConfig {
             toolchains,
             use_btrfs,
             isolation_mode,
-        }
+        };
+
+        info!(
+            node_id = %cfg.node_id,
+            arch = %cfg.arch,
+            max_slots = cfg.max_slots,
+            max_threads = cfg.max_threads(),
+            tags = ?cfg.tags,
+            toolchains = ?cfg.toolchains,
+            btrfs = cfg.use_btrfs,
+            "Loaded ActionRunner worker configuration (strictly 1 action slot per node)"
+        );
+
+        cfg
+    }
+
+    pub fn max_threads(&self) -> u32 {
+        let default_threads = if self.node_id.eq_ignore_ascii_case("entrance")
+            || self.tags.iter().any(|t| t.eq_ignore_ascii_case("n100"))
+        {
+            2
+        } else {
+            6
+        };
+
+        std::env::var("ACTION_RUNNER_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .or_else(|| {
+                std::env::var("CARGO_BUILD_JOBS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+            })
+            .unwrap_or(default_threads)
+            .max(1)
     }
 
     fn detect_btrfs(path: &Path) -> bool {

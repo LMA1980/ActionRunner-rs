@@ -38,16 +38,31 @@ impl StageRunner {
         started_tx: Option<tokio::sync::oneshot::Sender<u32>>,
     ) -> StageExecutionResult {
         let start_time = Utc::now();
-        let build_jobs = std::env::var("CARGO_BUILD_JOBS")
+        let node_thread_limit = self.config.max_threads();
+        let build_jobs = std::env::var("ACTION_RUNNER_THREADS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(task.threads);
+            .or_else(|| {
+                std::env::var("CARGO_BUILD_JOBS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+            })
+            .unwrap_or_else(|| {
+                if task.threads > 0 {
+                    task.threads.min(node_thread_limit)
+                } else {
+                    node_thread_limit
+                }
+            })
+            .min(node_thread_limit)
+            .max(1);
 
         info!(
             job_id = %task.job_id,
             stage = %task.stage_id,
             toolchain = ?task.toolchain,
             threads = build_jobs,
+            node_max_threads = node_thread_limit,
             "Executing stage on worker node"
         );
 
@@ -85,6 +100,8 @@ impl StageRunner {
             IsolationMode::None => {
                 let mut bcmd = Command::new("bash");
                 bcmd.arg("-e").arg("-c").arg(&task.command);
+                #[cfg(unix)]
+                bcmd.process_group(0);
                 bcmd
             }
         };
@@ -99,6 +116,9 @@ impl StageRunner {
         cmd.env("GITHUB_REPOSITORY", &task.repo_name);
         cmd.env("GITHUB_SHA", &task.commit_sha);
         cmd.env("CARGO_BUILD_JOBS", build_jobs.to_string());
+        cmd.env("RUST_TEST_THREADS", build_jobs.to_string());
+        cmd.env("RAYON_NUM_THREADS", build_jobs.to_string());
+        cmd.env("CMAKE_BUILD_PARALLEL_LEVEL", build_jobs.to_string());
         cmd.env("CARGO_TERM_COLOR", "always");
 
         // Toolchain Injection (LLVM 24 / GCC 17 with SpacemiT X100 Target)
