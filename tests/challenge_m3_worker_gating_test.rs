@@ -642,6 +642,9 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
                 sandbox: SandboxConstraintSpec::default(),
             }],
             sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: Some(
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+            ),
         };
         let s_payload = fory.serialize(&shared_task).unwrap();
         let s_hdr = IpcHeader::new(MSG_TYPE_STAGE_DISPATCH, s_payload.len() as u32, 0, 101);
@@ -675,6 +678,7 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
                 sandbox: SandboxConstraintSpec::default(),
             }],
             sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: None,
         };
         let e_payload = fory.serialize(&exc_task).unwrap();
         let e_hdr = IpcHeader::new(MSG_TYPE_STAGE_DISPATCH, e_payload.len() as u32, 0, 102);

@@ -14,6 +14,11 @@ use tracing::{error, info};
 
 use crate::config::{is_safe_repo_name, WorkerConfig};
 use crate::sandbox::WorkerSandboxRunner;
+use crate::telemetry_emitter::{
+    convert_metrics_to_benchmark_entries, convert_metrics_to_test_entries,
+    extract_crate_name_from_invocation, BenchmarkRunEntry, HardwareProfile, OtelSpanEntry,
+    StageTraceSession, TelemetryEmitter, TestCaseRunEntry,
+};
 
 /// Canonical execution and validation errors for the worker stage runner.
 #[derive(thiserror::Error, Debug)]
@@ -251,8 +256,10 @@ struct ExecutionContext {
 pub struct StageRunner {
     config: WorkerConfig,
     sandbox_runner: WorkerSandboxRunner,
+    telemetry_emitter: TelemetryEmitter,
 }
 
+#[derive(Debug, Clone)]
 pub struct StageExecutionResult {
     pub exit_code: i32,
     pub duration_secs: u64,
@@ -260,6 +267,34 @@ pub struct StageExecutionResult {
     pub pid: u32,
     pub error_message: Option<String>,
     pub security_grant_denied: Option<SecurityGrantDenied>,
+    pub traceparent: Option<String>,
+    pub child_span: Option<OtelSpanEntry>,
+    pub test_case_runs: Vec<TestCaseRunEntry>,
+    pub benchmark_runs: Vec<BenchmarkRunEntry>,
+}
+
+impl StageExecutionResult {
+    fn failed_early(
+        session: &StageTraceSession,
+        exit_code: i32,
+        duration_secs: u64,
+        pid: u32,
+        error_message: String,
+        security_grant_denied: Option<SecurityGrantDenied>,
+    ) -> Self {
+        let child_span = session.finish_span(exit_code, Some(&error_message));
+        Self {
+            exit_code,
+            duration_secs,
+            pid,
+            error_message: Some(error_message),
+            security_grant_denied,
+            traceparent: Some(session.echo_traceparent.clone()),
+            child_span: Some(child_span),
+            test_case_runs: Vec::new(),
+            benchmark_runs: Vec::new(),
+        }
+    }
 }
 
 /// Helper creating a ToolRegistry equipped with built-in adapters and extended flag support for worker diagnostics.
@@ -337,6 +372,7 @@ impl StageRunner {
         Self {
             config,
             sandbox_runner,
+            telemetry_emitter: TelemetryEmitter::from_env(),
         }
     }
 
@@ -344,7 +380,14 @@ impl StageRunner {
         Self {
             config,
             sandbox_runner,
+            telemetry_emitter: TelemetryEmitter::from_env(),
         }
+    }
+
+    #[must_use]
+    pub fn with_telemetry_emitter(mut self, telemetry_emitter: TelemetryEmitter) -> Self {
+        self.telemetry_emitter = telemetry_emitter;
+        self
     }
 
     pub async fn run_stage(
@@ -354,6 +397,9 @@ impl StageRunner {
         started_tx: Option<tokio::sync::oneshot::Sender<u32>>,
     ) -> StageExecutionResult {
         let start_time = Utc::now();
+        let stage_hardware = HardwareProfile::detect(&self.config, task, task.tasks.first());
+        let mut trace_session =
+            StageTraceSession::from_dispatch_task(task, &self.config.node_id, &stage_hardware);
         let node_thread_limit = self.config.max_threads();
         let build_jobs = std::env::var("ACTION_RUNNER_THREADS")
             .ok()
@@ -376,6 +422,8 @@ impl StageRunner {
         info!(
             job_id = %task.job_id,
             stage = %task.stage_id,
+            trace_id = %trace_session.trace_id_hex(),
+            span_id = %trace_session.span_id_hex(),
             toolchain = ?task.toolchain,
             threads = build_jobs,
             node_max_threads = node_thread_limit,
@@ -390,13 +438,14 @@ impl StageRunner {
                 task.repo_name
             );
             error!("{}", err_msg);
-            return StageExecutionResult {
-                exit_code: -1,
-                duration_secs: 0,
-                pid: 0,
-                error_message: Some(err_msg),
-                security_grant_denied: None,
-            };
+            let res = StageExecutionResult::failed_early(&trace_session, -1, 0, 0, err_msg, None);
+            if let Some(span) = &res.child_span {
+                let _ = self
+                    .telemetry_emitter
+                    .emit_stage_bundle(std::slice::from_ref(span), &[], &[], &[])
+                    .await;
+            }
+            return res;
         }
 
         // Validate job_id and stage_id against path traversal
@@ -406,13 +455,14 @@ impl StageRunner {
                 task.job_id, task.stage_id
             );
             error!("{}", err_msg);
-            return StageExecutionResult {
-                exit_code: -1,
-                duration_secs: 0,
-                pid: 0,
-                error_message: Some(err_msg),
-                security_grant_denied: None,
-            };
+            let res = StageExecutionResult::failed_early(&trace_session, -1, 0, 0, err_msg, None);
+            if let Some(span) = &res.child_span {
+                let _ = self
+                    .telemetry_emitter
+                    .emit_stage_bundle(std::slice::from_ref(span), &[], &[], &[])
+                    .await;
+            }
+            return res;
         }
 
         // Validate working_dir upfront (before workspace creation)
@@ -420,30 +470,35 @@ impl StageRunner {
             let dummy = Path::new("/tmp/stage_check");
             if let Err(err_msg) = validate_and_resolve_working_dir(dummy, Some(rel)) {
                 error!("{}", err_msg);
-                return StageExecutionResult {
-                    exit_code: -1,
-                    duration_secs: 0,
-                    pid: 0,
-                    error_message: Some(err_msg),
-                    security_grant_denied: None,
-                };
+                let res =
+                    StageExecutionResult::failed_early(&trace_session, -1, 0, 0, err_msg, None);
+                if let Some(span) = &res.child_span {
+                    let _ = self
+                        .telemetry_emitter
+                        .emit_stage_bundle(std::slice::from_ref(span), &[], &[], &[])
+                        .await;
+                }
+                return res;
             }
         }
 
+        let setup_start = std::time::Instant::now();
         let stage_dir = self.prepare_stage_workspace(task, &log_tx).await;
+        trace_session.record_sandbox_setup_ns(setup_start.elapsed().as_nanos() as u64);
 
         if let Err(err_msg) =
             validate_and_resolve_working_dir(&stage_dir, task.working_dir.as_deref())
         {
             error!("{}", err_msg);
             self.cleanup_stage_workspace(&stage_dir).await;
-            return StageExecutionResult {
-                exit_code: -1,
-                duration_secs: 0,
-                pid: 0,
-                error_message: Some(err_msg),
-                security_grant_denied: None,
-            };
+            let res = StageExecutionResult::failed_early(&trace_session, -1, 0, 0, err_msg, None);
+            if let Some(span) = &res.child_span {
+                let _ = self
+                    .telemetry_emitter
+                    .emit_stage_bundle(std::slice::from_ref(span), &[], &[], &[])
+                    .await;
+            }
+            return res;
         }
 
         let ctx = ExecutionContext {
@@ -452,28 +507,30 @@ impl StageRunner {
         };
 
         if task.tasks.is_empty() {
-            let err_msg = "StageDispatchTask requires non-empty typed tasks";
+            let err_msg = "StageDispatchTask requires non-empty typed tasks".to_string();
             error!(
                 job_id = %task.job_id,
                 stage_id = %task.stage_id,
                 "{}", err_msg
             );
             self.cleanup_stage_workspace(&stage_dir).await;
-            return StageExecutionResult {
-                exit_code: -1,
-                duration_secs: 0,
-                pid: 0,
-                error_message: Some(err_msg.to_string()),
-                security_grant_denied: None,
-            };
+            let res = StageExecutionResult::failed_early(&trace_session, -1, 0, 0, err_msg, None);
+            if let Some(span) = &res.child_span {
+                let _ = self
+                    .telemetry_emitter
+                    .emit_stage_bundle(std::slice::from_ref(span), &[], &[], &[])
+                    .await;
+            }
+            return res;
         }
 
-        self.run_v3_typed_tasks(task, &stage_dir, log_tx, started_tx, ctx)
+        self.run_v3_typed_tasks(task, &stage_dir, log_tx, started_tx, ctx, trace_session)
             .await
     }
 
-    /// Sub-tasks #20, #21, #24, #25: Execute typed tasks via `ToolAdapter::build_argv()` directly
-    /// inside attenuated `MuIsolation` sandbox without shell wrappers.
+    /// Sub-tasks #20, #21, #24, #25, #33, #34: Execute typed tasks via `ToolAdapter::build_argv()`
+    /// directly inside attenuated `MuIsolation` sandbox without shell wrappers, correlating logs
+    /// and metrics into W3C-linked Arrow telemetry batches.
     async fn run_v3_typed_tasks(
         &self,
         task: &StageDispatchTask,
@@ -481,14 +538,19 @@ impl StageRunner {
         log_tx: mpsc::Sender<Vec<u8>>,
         mut started_tx: Option<tokio::sync::oneshot::Sender<u32>>,
         ctx: ExecutionContext,
+        mut trace_session: StageTraceSession,
     ) -> StageExecutionResult {
         let start_time = ctx.start_time;
         let build_jobs = ctx.build_jobs;
         let registry = build_worker_tool_registry();
         let line_counter = Arc::new(AtomicU32::new(1));
         let mut last_pid = 0u32;
+        let mut all_stage_logs: Vec<LogEntry> = Vec::new();
+        let mut all_test_runs: Vec<TestCaseRunEntry> = Vec::new();
+        let mut all_bench_runs: Vec<BenchmarkRunEntry> = Vec::new();
 
         for inv in &task.tasks {
+            let sandbox_step_start = std::time::Instant::now();
             // 1. #25: Shell prohibition check on tool_name and args
             let empty_argv: [OsString; 0] = [];
             if let Err(e) = validate_no_shell_invocation(&inv.tool_name, &empty_argv) {
@@ -499,13 +561,28 @@ impl StageRunner {
                     e
                 );
                 self.cleanup_stage_workspace(stage_dir).await;
-                return StageExecutionResult {
-                    exit_code: 126,
-                    duration_secs: (Utc::now() - start_time).num_seconds().max(0) as u64,
-                    pid: 0,
-                    error_message: Some(e.to_string()),
-                    security_grant_denied: None,
-                };
+                let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
+                let res = StageExecutionResult::failed_early(
+                    &trace_session,
+                    126,
+                    duration_secs,
+                    0,
+                    e.to_string(),
+                    None,
+                );
+                let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                if let Some(span) = &res.child_span {
+                    let _ = self
+                        .telemetry_emitter
+                        .emit_stage_bundle(
+                            std::slice::from_ref(span),
+                            &otel_logs,
+                            &all_test_runs,
+                            &all_bench_runs,
+                        )
+                        .await;
+                }
+                return res;
             }
 
             for arg in &inv.args {
@@ -516,13 +593,28 @@ impl StageRunner {
                     };
                     error!("{}", err);
                     self.cleanup_stage_workspace(stage_dir).await;
-                    return StageExecutionResult {
-                        exit_code: 126,
-                        duration_secs: (Utc::now() - start_time).num_seconds().max(0) as u64,
-                        pid: 0,
-                        error_message: Some(err.to_string()),
-                        security_grant_denied: None,
-                    };
+                    let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
+                    let res = StageExecutionResult::failed_early(
+                        &trace_session,
+                        126,
+                        duration_secs,
+                        0,
+                        err.to_string(),
+                        None,
+                    );
+                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                    if let Some(span) = &res.child_span {
+                        let _ = self
+                            .telemetry_emitter
+                            .emit_stage_bundle(
+                                std::slice::from_ref(span),
+                                &otel_logs,
+                                &all_test_runs,
+                                &all_bench_runs,
+                            )
+                            .await;
+                    }
+                    return res;
                 }
             }
 
@@ -533,13 +625,28 @@ impl StageRunner {
                     let err_msg = format!("Unknown or unsupported tool '{}': {}", inv.tool_name, e);
                     error!("{}", err_msg);
                     self.cleanup_stage_workspace(stage_dir).await;
-                    return StageExecutionResult {
-                        exit_code: 127,
-                        duration_secs: (Utc::now() - start_time).num_seconds().max(0) as u64,
-                        pid: 0,
-                        error_message: Some(err_msg),
-                        security_grant_denied: None,
-                    };
+                    let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
+                    let res = StageExecutionResult::failed_early(
+                        &trace_session,
+                        127,
+                        duration_secs,
+                        0,
+                        err_msg,
+                        None,
+                    );
+                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                    if let Some(span) = &res.child_span {
+                        let _ = self
+                            .telemetry_emitter
+                            .emit_stage_bundle(
+                                std::slice::from_ref(span),
+                                &otel_logs,
+                                &all_test_runs,
+                                &all_bench_runs,
+                            )
+                            .await;
+                    }
+                    return res;
                 }
             };
 
@@ -560,13 +667,28 @@ impl StageRunner {
                 );
                 error!("{}", err_msg);
                 self.cleanup_stage_workspace(stage_dir).await;
-                return StageExecutionResult {
-                    exit_code: 126,
-                    duration_secs: (Utc::now() - start_time).num_seconds().max(0) as u64,
-                    pid: 0,
-                    error_message: Some(err_msg),
-                    security_grant_denied: None,
-                };
+                let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
+                let res = StageExecutionResult::failed_early(
+                    &trace_session,
+                    126,
+                    duration_secs,
+                    0,
+                    err_msg,
+                    None,
+                );
+                let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                if let Some(span) = &res.child_span {
+                    let _ = self
+                        .telemetry_emitter
+                        .emit_stage_bundle(
+                            std::slice::from_ref(span),
+                            &otel_logs,
+                            &all_test_runs,
+                            &all_bench_runs,
+                        )
+                        .await;
+                }
+                return res;
             }
 
             let argv = match adapter.build_argv(&tool_inv) {
@@ -578,13 +700,28 @@ impl StageRunner {
                     );
                     error!("{}", err_msg);
                     self.cleanup_stage_workspace(stage_dir).await;
-                    return StageExecutionResult {
-                        exit_code: 126,
-                        duration_secs: (Utc::now() - start_time).num_seconds().max(0) as u64,
-                        pid: 0,
-                        error_message: Some(err_msg),
-                        security_grant_denied: None,
-                    };
+                    let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
+                    let res = StageExecutionResult::failed_early(
+                        &trace_session,
+                        126,
+                        duration_secs,
+                        0,
+                        err_msg,
+                        None,
+                    );
+                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                    if let Some(span) = &res.child_span {
+                        let _ = self
+                            .telemetry_emitter
+                            .emit_stage_bundle(
+                                std::slice::from_ref(span),
+                                &otel_logs,
+                                &all_test_runs,
+                                &all_bench_runs,
+                            )
+                            .await;
+                    }
+                    return res;
                 }
             };
 
@@ -597,13 +734,28 @@ impl StageRunner {
                     e
                 );
                 self.cleanup_stage_workspace(stage_dir).await;
-                return StageExecutionResult {
-                    exit_code: 126,
-                    duration_secs: (Utc::now() - start_time).num_seconds().max(0) as u64,
-                    pid: 0,
-                    error_message: Some(e.to_string()),
-                    security_grant_denied: None,
-                };
+                let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
+                let res = StageExecutionResult::failed_early(
+                    &trace_session,
+                    126,
+                    duration_secs,
+                    0,
+                    e.to_string(),
+                    None,
+                );
+                let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                if let Some(span) = &res.child_span {
+                    let _ = self
+                        .telemetry_emitter
+                        .emit_stage_bundle(
+                            std::slice::from_ref(span),
+                            &otel_logs,
+                            &all_test_runs,
+                            &all_bench_runs,
+                        )
+                        .await;
+                }
+                return res;
             }
 
             // 5. #20 & #21: Attenuate sandbox constraints
@@ -618,13 +770,28 @@ impl StageRunner {
                 Err(err) => {
                     let (denied, msg) = WorkerSandboxRunner::handle_security_violation(task, &err);
                     self.cleanup_stage_workspace(stage_dir).await;
-                    return StageExecutionResult {
-                        exit_code: 126,
-                        duration_secs: (Utc::now() - start_time).num_seconds().max(0) as u64,
-                        pid: 0,
-                        error_message: Some(msg),
-                        security_grant_denied: Some(denied),
-                    };
+                    let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
+                    let res = StageExecutionResult::failed_early(
+                        &trace_session,
+                        126,
+                        duration_secs,
+                        0,
+                        msg,
+                        Some(denied),
+                    );
+                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                    if let Some(span) = &res.child_span {
+                        let _ = self
+                            .telemetry_emitter
+                            .emit_stage_bundle(
+                                std::slice::from_ref(span),
+                                &otel_logs,
+                                &all_test_runs,
+                                &all_bench_runs,
+                            )
+                            .await;
+                    }
+                    return res;
                 }
             };
 
@@ -633,13 +800,28 @@ impl StageRunner {
                 Err(err) => {
                     let (denied, msg) = WorkerSandboxRunner::handle_security_violation(task, &err);
                     self.cleanup_stage_workspace(stage_dir).await;
-                    return StageExecutionResult {
-                        exit_code: 126,
-                        duration_secs: (Utc::now() - start_time).num_seconds().max(0) as u64,
-                        pid: 0,
-                        error_message: Some(msg),
-                        security_grant_denied: Some(denied),
-                    };
+                    let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
+                    let res = StageExecutionResult::failed_early(
+                        &trace_session,
+                        126,
+                        duration_secs,
+                        0,
+                        msg,
+                        Some(denied),
+                    );
+                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                    if let Some(span) = &res.child_span {
+                        let _ = self
+                            .telemetry_emitter
+                            .emit_stage_bundle(
+                                std::slice::from_ref(span),
+                                &otel_logs,
+                                &all_test_runs,
+                                &all_bench_runs,
+                            )
+                            .await;
+                    }
+                    return res;
                 }
             };
 
@@ -647,6 +829,8 @@ impl StageRunner {
             let _ = self
                 .sandbox_runner
                 .apply_thread_registration_if_needed(&effective);
+
+            trace_session.record_sandbox_setup_ns(sandbox_step_start.elapsed().as_nanos() as u64);
 
             // 6. Direct execution: spawn Command::new(&argv[0]).args(&argv[1..])
             // Zero shell wrapper (-c)! Direct process invocation
@@ -663,13 +847,28 @@ impl StageRunner {
                 Err(e) => {
                     error!("{}", e);
                     self.cleanup_stage_workspace(stage_dir).await;
-                    return StageExecutionResult {
-                        exit_code: -1,
-                        duration_secs: (Utc::now() - start_time).num_seconds().max(0) as u64,
-                        pid: 0,
-                        error_message: Some(e),
-                        security_grant_denied: None,
-                    };
+                    let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
+                    let res = StageExecutionResult::failed_early(
+                        &trace_session,
+                        -1,
+                        duration_secs,
+                        0,
+                        e,
+                        None,
+                    );
+                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                    if let Some(span) = &res.child_span {
+                        let _ = self
+                            .telemetry_emitter
+                            .emit_stage_bundle(
+                                std::slice::from_ref(span),
+                                &otel_logs,
+                                &all_test_runs,
+                                &all_bench_runs,
+                            )
+                            .await;
+                    }
+                    return res;
                 }
             };
 
@@ -684,6 +883,7 @@ impl StageRunner {
             cmd.env("JOB_ID", &task.job_id);
             cmd.env("STAGE_ID", &task.stage_id);
             cmd.env("TASK_ID", &inv.task_id);
+            cmd.env("TRACEPARENT", trace_session.child_traceparent());
             cmd.env("GITHUB_REPOSITORY", &task.repo_name);
             cmd.env("GITHUB_SHA", &task.commit_sha);
             cmd.env("CARGO_BUILD_JOBS", build_jobs.to_string());
@@ -704,6 +904,7 @@ impl StageRunner {
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
 
+            let tool_exec_start = std::time::Instant::now();
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
                 Err(e) => {
@@ -713,13 +914,28 @@ impl StageRunner {
                     );
                     error!("{}", err_msg);
                     self.cleanup_stage_workspace(stage_dir).await;
-                    return StageExecutionResult {
-                        exit_code: -1,
-                        duration_secs: (Utc::now() - start_time).num_seconds().max(0) as u64,
-                        pid: 0,
-                        error_message: Some(err_msg),
-                        security_grant_denied: None,
-                    };
+                    let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
+                    let res = StageExecutionResult::failed_early(
+                        &trace_session,
+                        -1,
+                        duration_secs,
+                        0,
+                        err_msg,
+                        None,
+                    );
+                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                    if let Some(span) = &res.child_span {
+                        let _ = self
+                            .telemetry_emitter
+                            .emit_stage_bundle(
+                                std::slice::from_ref(span),
+                                &otel_logs,
+                                &all_test_runs,
+                                &all_bench_runs,
+                            )
+                            .await;
+                    }
+                    return res;
                 }
             };
 
@@ -741,6 +957,7 @@ impl StageRunner {
                     pid, argv
                 ),
             };
+            all_stage_logs.push(spawn_entry.clone());
             if let Ok(bytes) = encode_log_batch(&[spawn_entry]) {
                 let _ = log_tx.send(bytes).await;
             }
@@ -756,13 +973,17 @@ impl StageRunner {
                 let line_counter = line_counter.clone();
 
                 tokio::spawn(async move {
+                    let mut collected_logs = Vec::new();
+                    let mut collected_bytes = Vec::new();
                     if let Some(out) = stdout {
                         let mut reader = BufReader::new(out).lines();
                         let mut buffer = Vec::new();
 
                         while let Ok(Some(line)) = reader.next_line().await {
+                            collected_bytes.extend_from_slice(line.as_bytes());
+                            collected_bytes.push(b'\n');
                             let l_num = line_counter.fetch_add(1, Ordering::Relaxed);
-                            buffer.push(LogEntry {
+                            let entry = LogEntry {
                                 timestamp_us: Utc::now().timestamp_micros(),
                                 job_id: job_id.clone(),
                                 stage_id: stage_id.clone(),
@@ -770,7 +991,9 @@ impl StageRunner {
                                 stream: 1,
                                 line_no: l_num,
                                 content: line,
-                            });
+                            };
+                            collected_logs.push(entry.clone());
+                            buffer.push(entry);
 
                             if buffer.len() >= 16 {
                                 if let Ok(bytes) = encode_log_batch(&buffer) {
@@ -786,6 +1009,7 @@ impl StageRunner {
                             }
                         }
                     }
+                    (collected_logs, collected_bytes)
                 })
             };
 
@@ -797,13 +1021,17 @@ impl StageRunner {
                 let line_counter = line_counter.clone();
 
                 tokio::spawn(async move {
+                    let mut collected_logs = Vec::new();
+                    let mut collected_bytes = Vec::new();
                     if let Some(err) = stderr {
                         let mut reader = BufReader::new(err).lines();
                         let mut buffer = Vec::new();
 
                         while let Ok(Some(line)) = reader.next_line().await {
+                            collected_bytes.extend_from_slice(line.as_bytes());
+                            collected_bytes.push(b'\n');
                             let l_num = line_counter.fetch_add(1, Ordering::Relaxed);
-                            buffer.push(LogEntry {
+                            let entry = LogEntry {
                                 timestamp_us: Utc::now().timestamp_micros(),
                                 job_id: job_id.clone(),
                                 stage_id: stage_id.clone(),
@@ -811,7 +1039,9 @@ impl StageRunner {
                                 stream: 2,
                                 line_no: l_num,
                                 content: line,
-                            });
+                            };
+                            collected_logs.push(entry.clone());
+                            buffer.push(entry);
 
                             if buffer.len() >= 16 {
                                 if let Ok(bytes) = encode_log_batch(&buffer) {
@@ -827,57 +1057,137 @@ impl StageRunner {
                             }
                         }
                     }
+                    (collected_logs, collected_bytes)
                 })
             };
 
             let timeout_duration = Duration::from_secs(task.timeout_seconds);
             let execution_result = timeout(timeout_duration, child.wait()).await;
 
-            let _ = out_handle.await;
-            let _ = err_handle.await;
+            let (out_logs, stdout_bytes) = out_handle.await.unwrap_or_default();
+            let (err_logs, stderr_bytes) = err_handle.await.unwrap_or_default();
+            trace_session.record_tool_execution_ns(tool_exec_start.elapsed().as_nanos() as u64);
+
+            all_stage_logs.extend(out_logs);
+            all_stage_logs.extend(err_logs);
 
             let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
 
             match execution_result {
                 Ok(Ok(status)) => {
                     let code = status.code().unwrap_or(-1);
+                    let parse_start = std::time::Instant::now();
+                    if let Ok(metrics) = adapter.parse_metrics(&stdout_bytes, &stderr_bytes, code) {
+                        let now_ns = Utc::now()
+                            .timestamp_nanos_opt()
+                            .unwrap_or(trace_session.start_time_unix_nano);
+                        let inv_hw = HardwareProfile::detect(&self.config, task, Some(inv));
+                        let crate_name = extract_crate_name_from_invocation(inv, &task.repo_name);
+                        all_test_runs.extend(convert_metrics_to_test_entries(
+                            &metrics,
+                            task,
+                            &crate_name,
+                            &inv.tool_name,
+                            &self.config.node_id,
+                            &inv_hw,
+                            now_ns,
+                        ));
+                        all_bench_runs.extend(convert_metrics_to_benchmark_entries(
+                            &metrics,
+                            task,
+                            &crate_name,
+                            &self.config.node_id,
+                            &inv_hw,
+                            now_ns,
+                        ));
+                    }
+                    trace_session.record_metric_parse_ns(parse_start.elapsed().as_nanos() as u64);
+
                     if code != 0 {
                         self.cleanup_stage_workspace(stage_dir).await;
+                        let err_msg = format!(
+                            "Tool '{}' exited with status code {:?}",
+                            inv.tool_name,
+                            status.code()
+                        );
+                        let child_span = trace_session.finish_span(code, Some(&err_msg));
+                        let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                        let _ = self
+                            .telemetry_emitter
+                            .emit_stage_bundle(
+                                std::slice::from_ref(&child_span),
+                                &otel_logs,
+                                &all_test_runs,
+                                &all_bench_runs,
+                            )
+                            .await;
                         return StageExecutionResult {
                             exit_code: code,
                             duration_secs,
                             pid,
-                            error_message: Some(format!(
-                                "Tool '{}' exited with status code {:?}",
-                                inv.tool_name,
-                                status.code()
-                            )),
+                            error_message: Some(err_msg),
                             security_grant_denied: None,
+                            traceparent: Some(trace_session.echo_traceparent),
+                            child_span: Some(child_span),
+                            test_case_runs: all_test_runs,
+                            benchmark_runs: all_bench_runs,
                         };
                     }
                 }
                 Ok(Err(e)) => {
                     self.cleanup_stage_workspace(stage_dir).await;
+                    let err_msg = format!("I/O wait error: {}", e);
+                    let child_span = trace_session.finish_span(-1, Some(&err_msg));
+                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                    let _ = self
+                        .telemetry_emitter
+                        .emit_stage_bundle(
+                            std::slice::from_ref(&child_span),
+                            &otel_logs,
+                            &all_test_runs,
+                            &all_bench_runs,
+                        )
+                        .await;
                     return StageExecutionResult {
                         exit_code: -1,
                         duration_secs,
                         pid,
-                        error_message: Some(format!("I/O wait error: {}", e)),
+                        error_message: Some(err_msg),
                         security_grant_denied: None,
+                        traceparent: Some(trace_session.echo_traceparent),
+                        child_span: Some(child_span),
+                        test_case_runs: all_test_runs,
+                        benchmark_runs: all_bench_runs,
                     };
                 }
                 Err(_) => {
                     let _ = child.kill().await;
                     self.cleanup_stage_workspace(stage_dir).await;
+                    let err_msg = format!(
+                        "Tool '{}' timed out after {} seconds",
+                        inv.tool_name, task.timeout_seconds
+                    );
+                    let child_span = trace_session.finish_span(124, Some(&err_msg));
+                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                    let _ = self
+                        .telemetry_emitter
+                        .emit_stage_bundle(
+                            std::slice::from_ref(&child_span),
+                            &otel_logs,
+                            &all_test_runs,
+                            &all_bench_runs,
+                        )
+                        .await;
                     return StageExecutionResult {
                         exit_code: 124,
                         duration_secs,
                         pid,
-                        error_message: Some(format!(
-                            "Tool '{}' timed out after {} seconds",
-                            inv.tool_name, task.timeout_seconds
-                        )),
+                        error_message: Some(err_msg),
                         security_grant_denied: None,
+                        traceparent: Some(trace_session.echo_traceparent),
+                        child_span: Some(child_span),
+                        test_case_runs: all_test_runs,
+                        benchmark_runs: all_bench_runs,
                     };
                 }
             }
@@ -897,11 +1207,24 @@ impl StageRunner {
                 duration_secs
             ),
         };
+        all_stage_logs.push(exit_entry.clone());
         if let Ok(bytes) = encode_log_batch(&[exit_entry]) {
             let _ = log_tx.send(bytes).await;
         }
 
         self.cleanup_stage_workspace(stage_dir).await;
+
+        let child_span = trace_session.finish_span(0, None);
+        let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+        let _ = self
+            .telemetry_emitter
+            .emit_stage_bundle(
+                std::slice::from_ref(&child_span),
+                &otel_logs,
+                &all_test_runs,
+                &all_bench_runs,
+            )
+            .await;
 
         StageExecutionResult {
             exit_code: 0,
@@ -909,6 +1232,10 @@ impl StageRunner {
             pid: last_pid,
             error_message: None,
             security_grant_denied: None,
+            traceparent: Some(trace_session.echo_traceparent),
+            child_span: Some(child_span),
+            test_case_runs: all_test_runs,
+            benchmark_runs: all_bench_runs,
         }
     }
 
@@ -1309,6 +1636,7 @@ mod tests {
                 sandbox: SandboxConstraintSpec::default(),
             }],
             sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: None,
         };
 
         let res = runner.run_stage(&task, tx, None).await;
@@ -1354,6 +1682,7 @@ mod tests {
             max_concurrent_per_node: 1,
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: None,
         };
 
         let res = runner.run_stage(&task, tx, None).await;
@@ -1439,6 +1768,7 @@ allow_spacemit_ai_thread: false
                 sandbox: SandboxConstraintSpec::default(),
             }],
             sandbox_constraints: excessive_constraints,
+            traceparent: None,
         };
 
         let res = runner.run_stage(&task, tx, None).await;
@@ -1489,6 +1819,7 @@ allow_spacemit_ai_thread: false
             max_concurrent_per_node: 1,
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: None,
         };
         let res = runner.run_stage(&bad_repo_task, tx.clone(), None).await;
         assert_eq!(res.exit_code, -1);
@@ -1515,6 +1846,7 @@ allow_spacemit_ai_thread: false
             max_concurrent_per_node: 1,
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: None,
         };
         let res2 = runner
             .run_stage(&bad_working_dir_task, tx.clone(), None)
@@ -1524,5 +1856,64 @@ allow_spacemit_ai_thread: false
             .error_message
             .unwrap()
             .contains("Absolute paths are forbidden"));
+    }
+
+    #[tokio::test]
+    async fn test_stage_runner_w3c_traceparent_and_child_span_subtask_33() {
+        let dir = tempdir().unwrap();
+        let config = WorkerConfig {
+            controller_url: "ws://127.0.0.1:8000/api/cluster/tunnel".into(),
+            cluster_token: "test".into(),
+            node_id: "worker-riscv64".into(),
+            arch: "riscv64".into(),
+            tags: vec!["k3".into(), "x100".into()],
+            max_slots: 1,
+            workspace_dir: dir.path().to_path_buf(),
+            toolchains: vec![],
+            use_btrfs: false,
+            isolation_mode: IsolationMode::None,
+        };
+        let runner = StageRunner::new(config);
+        let (tx, _rx) = mpsc::channel(32);
+
+        let parent_tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let task = StageDispatchTask {
+            job_id: "job-trace-33".into(),
+            stage_id: "stage-fmt-33".into(),
+            stage_name: "fmt".into(),
+            repo_name: "LMA1980/ActionRunner-rs".into(),
+            clone_url: "".into(),
+            commit_sha: "deadbeef".into(),
+            command: "".into(),
+            working_dir: None,
+            env_vars: vec![],
+            timeout_seconds: 10,
+            threads: 1,
+            toolchain: None,
+            exclusive: false,
+            max_concurrent_per_node: 1,
+            tasks: vec![TypedTaskInvocation {
+                task_id: "fmt-ver".into(),
+                tool_name: "cargo-fmt".into(),
+                args: vec!["--version".into()],
+                working_dir: None,
+                env_vars: vec![],
+                sandbox: SandboxConstraintSpec::default(),
+            }],
+            sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: Some(parent_tp.to_string()),
+        };
+
+        let res = runner.run_stage(&task, tx, None).await;
+        assert_eq!(res.exit_code, 0);
+        assert_eq!(res.traceparent.as_deref(), Some(parent_tp));
+        let span = res.child_span.expect("child span must be produced");
+        assert_eq!(span.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(span.parent_span_id.as_deref(), Some("00f067aa0ba902b7"));
+        assert_ne!(span.span_id, "00f067aa0ba902b7");
+        assert_eq!(span.status_code, "OK");
+        assert_eq!(span.node_id, "worker-riscv64");
+        assert!(span.attributes_json.contains("\"cpu_cluster\":\"X100\""));
+        assert!(span.attributes_json.contains("\"vlen_bits\":256"));
     }
 }

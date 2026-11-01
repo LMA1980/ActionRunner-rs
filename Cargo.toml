@@ -10,8 +10,9 @@ repository = "https://github.com/LMA1980/ActionRunner-rs"
 action-runner-ipc = { git = "https://github.com/LMA1980/ActionRunner-ipc.git", branch = "main" }
 action-runner-tools = { git = "https://github.com/LMA1980/ActionRunner-tools.git", branch = "main" }
 mu-isolation = { git = "https://github.com/LMA1980/MuIsolation.git", branch = "main" }
+muobserve-ipc = { git = "https://github.com/LMA1980/MuObserve-ipc.git", branch = "main" }
 serde_yaml = "0.9"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "sync", "time", "fs", "io-util", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "sync", "time", "fs", "io-util", "signal", "net"] }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
