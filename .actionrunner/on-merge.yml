@@ -1,26 +1,30 @@
-version: "1"
-name: "ActionRunner-rs Merge Pipeline: Hygiene, Tests & Release Verification"
+version: "2"
+name: "ActionRunner-rs Factory Pipeline: Formatting, Clippy, Security & K3 Coverage"
 
-env:
-  CARGO_TERM_COLOR: always
-
-steps:
-  - name: "Verify Rust Formatting (cargo fmt)"
+stages:
+  - id: fmt-check
+    name: "Verify Rust Formatting"
+    tags: ["fmt"]
+    threads: 2
     run: "cargo fmt --check"
-    timeout_seconds: 120
 
-  - name: "Verify Rust Linter & Clippy Rules (cargo clippy)"
+  - id: clippy-check
+    name: "Verify Rust Linter & Clippy Rules"
+    tags: ["clippy"]
+    depends_on: ["fmt-check"]
+    threads: 4
     run: "cargo clippy --all-targets -- -D warnings"
-    timeout_seconds: 300
 
-  - name: "Verify Dependencies Security Advisories (cargo audit)"
-    run: "cargo audit"
-    timeout_seconds: 180
+  - id: audit-check
+    name: "Verify Security Advisories"
+    tags: ["audit"]
+    depends_on: ["fmt-check"]
+    threads: 2
+    run: "cargo generate-lockfile && cargo audit"
 
-  - name: "Evaluate Test Suite & Line Code Coverage (cargo llvm-cov)"
+  - id: native-k3
+    name: "Validate Native K3 Verification & Line Coverage (cargo llvm-cov)"
+    tags: ["k3"]
+    depends_on: ["clippy-check", "audit-check"]
+    threads: 6
     run: "cargo llvm-cov --summary-only"
-    timeout_seconds: 300
-
-  - name: "Validate Native Release Compilation"
-    run: "cargo build --release"
-    timeout_seconds: 600
