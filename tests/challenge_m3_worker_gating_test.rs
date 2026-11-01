@@ -569,9 +569,9 @@ async fn test_challenge_6_multiple_queued_exclusive_tasks_serialize() {
 #[tokio::test]
 async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
     use action_runner_ipc::{
-        create_fory_runtime, IpcHeader, StageDispatchTask, WorkerRegistration,
-        MSG_TYPE_STAGE_COMPLETION, MSG_TYPE_STAGE_DISPATCH, MSG_TYPE_STAGE_STARTED,
-        MSG_TYPE_WORKER_HEARTBEAT, MSG_TYPE_WORKER_REGISTRATION,
+        create_fory_runtime, IpcHeader, SandboxConstraintSpec, StageDispatchTask,
+        WorkerRegistration, MSG_TYPE_STAGE_COMPLETION, MSG_TYPE_STAGE_DISPATCH,
+        MSG_TYPE_STAGE_STARTED, MSG_TYPE_WORKER_HEARTBEAT, MSG_TYPE_WORKER_REGISTRATION,
     };
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
@@ -631,6 +631,9 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
             threads: 1,
             toolchain: None,
             exclusive: false,
+            max_concurrent_per_node: 1,
+            tasks: vec![],
+            sandbox_constraints: SandboxConstraintSpec::default(),
         };
         let s_payload = fory.serialize(&shared_task).unwrap();
         let s_hdr = IpcHeader::new(MSG_TYPE_STAGE_DISPATCH, s_payload.len() as u32, 0, 101);
@@ -654,6 +657,9 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
             threads: 1,
             toolchain: None,
             exclusive: true,
+            max_concurrent_per_node: 1,
+            tasks: vec![],
+            sandbox_constraints: SandboxConstraintSpec::default(),
         };
         let e_payload = fory.serialize(&exc_task).unwrap();
         let e_hdr = IpcHeader::new(MSG_TYPE_STAGE_DISPATCH, e_payload.len() as u32, 0, 102);

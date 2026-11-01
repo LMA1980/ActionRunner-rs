@@ -111,7 +111,7 @@ impl WorkerConfig {
     }
 
     pub fn max_threads(&self) -> u32 {
-        let default_threads = if self.node_id.eq_ignore_ascii_case("entrance")
+        let default_threads = if self.node_id.eq_ignore_ascii_case("node-a")
             || self.tags.iter().any(|t| t.eq_ignore_ascii_case("n100"))
         {
             2
