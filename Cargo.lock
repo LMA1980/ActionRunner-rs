@@ -14,6 +14,7 @@ dependencies = [
  "futures-util",
  "libc",
  "mu-isolation",
+ "muobserve-ipc",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -29,7 +30,7 @@ dependencies = [
 [[package]]
 name = "action-runner-ipc"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/ActionRunner-ipc.git?branch=main#64879556ecdb547871bff1747a727fa29cc45593"
+source = "git+https://github.com/LMA1980/ActionRunner-ipc.git?branch=main#831120e7cf716b5549f9b94b8c4dc4cabdd6723c"
 dependencies = [
  "arrow",
  "bytes",
@@ -46,7 +47,7 @@ dependencies = [
 [[package]]
 name = "action-runner-tools"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/ActionRunner-tools.git?branch=main#4451e9136ed05d15b0688123225f533d55f94e37"
+source = "git+https://github.com/LMA1980/ActionRunner-tools.git?branch=main#0939fa26111c2a5c7c27c9a48e8e8165c562f305"
 dependencies = [
  "serde",
  "serde_json",
@@ -815,6 +816,21 @@ dependencies = [
  "serde_yaml",
  "thiserror 1.0.69",
  "tracing",
+]
+
+[[package]]
+name = "muobserve-ipc"
+version = "0.1.0"
+source = "git+https://github.com/LMA1980/MuObserve-ipc.git?branch=main#72476e02a6dc873a7a9122a7f4f55cf91ac88836"
+dependencies = [
+ "arrow",
+ "bytes",
+ "fory",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "zerocopy",
 ]
 
 [[package]]

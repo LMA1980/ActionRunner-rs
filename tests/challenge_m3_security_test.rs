@@ -80,6 +80,7 @@ async fn test_challenge_1_working_dir_path_traversal() {
             max_concurrent_per_node: 1,
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: None,
         };
 
         let res = runner.run_stage(&task, log_tx.clone(), None).await;
@@ -192,6 +193,7 @@ async fn test_challenge_2_repo_name_validation_and_traversal() {
             max_concurrent_per_node: 1,
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: None,
         };
 
         let res = runner.run_stage(&task, log_tx.clone(), None).await;
@@ -274,6 +276,7 @@ async fn test_challenge_3_job_and_stage_id_traversal() {
             max_concurrent_per_node: 1,
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: None,
         };
 
         let res = runner.run_stage(&task, log_tx.clone(), None).await;
@@ -489,6 +492,7 @@ async fn test_challenge_5_workspace_isolation_and_cleanup_boundary() {
             sandbox: SandboxConstraintSpec::default(),
         }],
         sandbox_constraints: SandboxConstraintSpec::default(),
+        traceparent: None,
     };
 
     let res = runner.run_stage(&task, log_tx, None).await;
@@ -558,6 +562,7 @@ async fn test_challenge_6_concurrent_adversarial_fuzzing() {
             max_concurrent_per_node: 1,
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: None,
         };
 
         handles.push(tokio::spawn(async move {

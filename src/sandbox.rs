@@ -336,6 +336,7 @@ pub mod tests {
             max_concurrent_per_node: 1,
             tasks: Vec::new(),
             sandbox_constraints: spec,
+            traceparent: None,
         }
     }
 

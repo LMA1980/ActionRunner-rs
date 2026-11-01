@@ -21,6 +21,7 @@ use tracing::{info, warn};
 use crate::concurrency::NodeConcurrencyLimiter;
 use crate::config::WorkerConfig;
 use crate::stage_runner::StageRunner;
+use crate::telemetry_emitter::{HardwareProfile, StageTraceSession};
 
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
@@ -387,6 +388,7 @@ impl WorkerAgent {
                                                                 .to_string(),
                                                         ),
                                                         security_grant_denied: None,
+                                                        traceparent: task.traceparent.clone(),
                                                     };
                                                     if let Ok(comp_payload) =
                                                         comp_fory.serialize(&report)
@@ -428,6 +430,18 @@ impl WorkerAgent {
                                                 let stage_id_started = task.stage_id.clone();
                                                 let job_id_started = task.job_id.clone();
                                                 let active_proc_reg = active_processes.clone();
+                                                let started_traceparent = Some(
+                                                    StageTraceSession::from_dispatch_task(
+                                                        &task,
+                                                        &node_id,
+                                                        &HardwareProfile {
+                                                            arch: String::new(),
+                                                            cpu_cluster: "generic".to_string(),
+                                                            vlen_bits: 0,
+                                                        },
+                                                    )
+                                                    .echo_traceparent,
+                                                );
 
                                                 tokio::spawn(async move {
                                                     if let Ok(pid) = started_rx.await {
@@ -446,6 +460,7 @@ impl WorkerAgent {
                                                             started_at_epoch_ms: Utc::now()
                                                                 .timestamp_millis()
                                                                 as u64,
+                                                            traceparent: started_traceparent,
                                                         };
                                                         if let Ok(sfory) = create_fory_runtime() {
                                                             if let Ok(spayload) =
@@ -535,6 +550,7 @@ impl WorkerAgent {
                                                     duration_secs: res.duration_secs,
                                                     error_message: res.error_message,
                                                     security_grant_denied: res.security_grant_denied,
+                                                    traceparent: res.traceparent.or_else(|| task.traceparent.clone()),
                                                 };
 
                                                 if let Ok(comp_payload) =

@@ -60,6 +60,7 @@ async fn test_stage_runner_execution_and_log_batching() {
             sandbox: SandboxConstraintSpec::default(),
         }],
         sandbox_constraints: SandboxConstraintSpec::default(),
+        traceparent: None,
     };
 
     let (started_tx, started_rx) = tokio::sync::oneshot::channel::<u32>();
@@ -253,6 +254,7 @@ async fn test_path_traversal_rejection_absolute_working_dir() {
         max_concurrent_per_node: 1,
         tasks: vec![],
         sandbox_constraints: SandboxConstraintSpec::default(),
+        traceparent: None,
     };
 
     let res = runner.run_stage(&task, log_tx, None).await;
@@ -300,6 +302,7 @@ async fn test_path_traversal_rejection_parent_dir() {
         max_concurrent_per_node: 1,
         tasks: vec![],
         sandbox_constraints: SandboxConstraintSpec::default(),
+        traceparent: None,
     };
 
     let res = runner.run_stage(&task, log_tx, None).await;
@@ -348,6 +351,7 @@ async fn test_path_traversal_rejection_malicious_repo_and_ids() {
         max_concurrent_per_node: 1,
         tasks: vec![],
         sandbox_constraints: SandboxConstraintSpec::default(),
+        traceparent: None,
     };
     let res1 = runner.run_stage(&bad_repo_task, log_tx.clone(), None).await;
     assert_eq!(res1.exit_code, -1);
@@ -374,6 +378,7 @@ async fn test_path_traversal_rejection_malicious_repo_and_ids() {
         max_concurrent_per_node: 1,
         tasks: vec![],
         sandbox_constraints: SandboxConstraintSpec::default(),
+        traceparent: None,
     };
     let res2 = runner.run_stage(&bad_job_task, log_tx.clone(), None).await;
     assert_eq!(res2.exit_code, -1);
@@ -397,10 +402,130 @@ async fn test_path_traversal_rejection_malicious_repo_and_ids() {
         max_concurrent_per_node: 1,
         tasks: vec![],
         sandbox_constraints: SandboxConstraintSpec::default(),
+        traceparent: None,
     };
     let res3 = runner.run_stage(&bad_stage_task, log_tx, None).await;
     assert_eq!(res3.exit_code, -1);
     assert!(res3.error_message.unwrap().contains("unsafe job_id"));
+}
+
+#[tokio::test]
+async fn test_stage_runner_streams_spans_and_correlated_logs_to_muobserve_collector() {
+    use action_runner::telemetry_emitter::{
+        decode_log_batch as decode_otel_logs, decode_span_batch, read_frame, write_frame,
+        IpcHeader, TelemetryEmitter, MSG_TYPE_ARROW_OTEL_LOGS, MSG_TYPE_ARROW_OTEL_SPANS,
+        MSG_TYPE_WAL_ACK,
+    };
+    use muobserve_ipc::{create_fory_runtime, WalBatchAck};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let collector_addr = listener.local_addr().unwrap().to_string();
+
+    let collector_handle = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let fory = create_fory_runtime().unwrap();
+        let mut spans = Vec::new();
+        let mut logs = Vec::new();
+        while let Ok((hdr, payload)) = read_frame(&mut stream).await {
+            if hdr.msg_type == MSG_TYPE_ARROW_OTEL_SPANS {
+                spans.extend(decode_span_batch(&payload).unwrap());
+            } else if hdr.msg_type == MSG_TYPE_ARROW_OTEL_LOGS {
+                logs.extend(decode_otel_logs(&payload).unwrap());
+            }
+            let ack = WalBatchAck {
+                sequence: hdr.sequence,
+                accepted_rows: 1,
+                ok: true,
+                error_message: None,
+            };
+            let ack_bytes = fory.serialize(&ack).unwrap();
+            let ack_hdr = IpcHeader::new(
+                MSG_TYPE_WAL_ACK,
+                u32::try_from(ack_bytes.len()).unwrap(),
+                0,
+                hdr.sequence,
+            );
+            write_frame(&mut stream, &ack_hdr, &ack_bytes)
+                .await
+                .unwrap();
+            if !spans.is_empty() && !logs.is_empty() {
+                break;
+            }
+        }
+        (spans, logs)
+    });
+
+    let temp_workspace = tempfile::tempdir().unwrap();
+    let config = WorkerConfig {
+        controller_url: "ws://127.0.0.1:8000/api/cluster/tunnel".to_string(),
+        cluster_token: "test-token".to_string(),
+        node_id: "worker-riscv64".to_string(),
+        arch: "riscv64".to_string(),
+        tags: vec!["k3".to_string(), "a100".to_string()],
+        max_slots: 1,
+        workspace_dir: temp_workspace.path().to_path_buf(),
+        toolchains: vec!["system".to_string()],
+        use_btrfs: false,
+        isolation_mode: IsolationMode::None,
+    };
+
+    let emitter = TelemetryEmitter::new(collector_addr).with_timeout(Duration::from_secs(2));
+    let runner = StageRunner::new(config).with_telemetry_emitter(emitter);
+    let (log_tx, _log_rx) = mpsc::channel(32);
+
+    let parent_tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    let task = StageDispatchTask {
+        job_id: "job-otel-1".to_string(),
+        stage_id: "stage-otel-1".to_string(),
+        stage_name: "Otel Span Test".to_string(),
+        repo_name: "LMA1980/ActionRunner-rs".to_string(),
+        clone_url: "".to_string(),
+        commit_sha: "cafebabe".to_string(),
+        command: "".to_string(),
+        working_dir: None,
+        env_vars: vec![],
+        timeout_seconds: 10,
+        threads: 1,
+        toolchain: None,
+        exclusive: false,
+        max_concurrent_per_node: 1,
+        tasks: vec![TypedTaskInvocation {
+            task_id: "t-otel-1".into(),
+            tool_name: "cargo-fmt".into(),
+            args: vec!["--version".into()],
+            working_dir: None,
+            env_vars: vec![],
+            sandbox: SandboxConstraintSpec::default(),
+        }],
+        sandbox_constraints: SandboxConstraintSpec::default(),
+        traceparent: Some(parent_tp.to_string()),
+    };
+
+    let res = runner.run_stage(&task, log_tx, None).await;
+    assert_eq!(res.exit_code, 0);
+    assert_eq!(res.traceparent.as_deref(), Some(parent_tp));
+
+    let (spans, logs) = tokio::time::timeout(Duration::from_secs(3), collector_handle)
+        .await
+        .expect("collector received frames")
+        .expect("collector task joined");
+
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+    assert_eq!(spans[0].parent_span_id.as_deref(), Some("00f067aa0ba902b7"));
+    assert!(spans[0]
+        .attributes_json
+        .contains("\"cpu_cluster\":\"A100\""));
+    assert!(spans[0].attributes_json.contains("\"vlen_bits\":1024"));
+
+    assert!(!logs.is_empty());
+    for log in &logs {
+        assert_eq!(log.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(log.span_id, spans[0].span_id);
+        assert_eq!(log.job_id.as_deref(), Some("job-otel-1"));
+        assert_eq!(log.stage_id.as_deref(), Some("stage-otel-1"));
+    }
 }
 
 #[test]
