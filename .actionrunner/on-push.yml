@@ -1,5 +1,5 @@
 version: "2"
-name: "ActionRunner-rs Distributed Pipeline: Formatting, Clippy, Security & K3 Verification"
+name: "ActionRunner-rs Factory Pipeline: Formatting, Clippy, Security & K3 Coverage"
 
 stages:
   - id: fmt-check
@@ -11,18 +11,20 @@ stages:
   - id: clippy-check
     name: "Verify Rust Linter & Clippy Rules"
     tags: ["clippy"]
+    depends_on: ["fmt-check"]
     threads: 4
     run: "cargo clippy --all-targets -- -D warnings"
 
   - id: audit-check
     name: "Verify Security Advisories"
     tags: ["audit"]
+    depends_on: ["fmt-check"]
     threads: 2
-    run: "cargo audit"
+    run: "cargo generate-lockfile && cargo audit"
 
   - id: native-k3
-    name: "Validate Native K3 Verification & Tests"
+    name: "Validate Native K3 Verification & Line Coverage (cargo llvm-cov)"
     tags: ["k3"]
-    depends_on: ["fmt-check", "clippy-check"]
+    depends_on: ["clippy-check", "audit-check"]
     threads: 6
-    run: "cargo test"
+    run: "cargo llvm-cov --summary-only"
