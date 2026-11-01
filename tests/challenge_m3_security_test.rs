@@ -2,7 +2,7 @@ use action_runner::config::{is_safe_repo_name, IsolationMode, WorkerConfig};
 use action_runner::stage_runner::{
     is_safe_identifier, sanitize_path_segment, validate_and_resolve_working_dir, StageRunner,
 };
-use action_runner_ipc::StageDispatchTask;
+use action_runner_ipc::{SandboxConstraintSpec, StageDispatchTask};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -77,6 +77,9 @@ async fn test_challenge_1_working_dir_path_traversal() {
             threads: 1,
             toolchain: None,
             exclusive: false,
+            max_concurrent_per_node: 1,
+            tasks: vec![],
+            sandbox_constraints: SandboxConstraintSpec::default(),
         };
 
         let res = runner.run_stage(&task, log_tx.clone(), None).await;
@@ -186,6 +189,9 @@ async fn test_challenge_2_repo_name_validation_and_traversal() {
             threads: 1,
             toolchain: None,
             exclusive: false,
+            max_concurrent_per_node: 1,
+            tasks: vec![],
+            sandbox_constraints: SandboxConstraintSpec::default(),
         };
 
         let res = runner.run_stage(&task, log_tx.clone(), None).await;
@@ -265,6 +271,9 @@ async fn test_challenge_3_job_and_stage_id_traversal() {
             threads: 1,
             toolchain: None,
             exclusive: false,
+            max_concurrent_per_node: 1,
+            tasks: vec![],
+            sandbox_constraints: SandboxConstraintSpec::default(),
         };
 
         let res = runner.run_stage(&task, log_tx.clone(), None).await;
@@ -470,6 +479,9 @@ async fn test_challenge_5_workspace_isolation_and_cleanup_boundary() {
         threads: 1,
         toolchain: None,
         exclusive: false,
+        max_concurrent_per_node: 1,
+        tasks: vec![],
+        sandbox_constraints: SandboxConstraintSpec::default(),
     };
 
     let res = runner.run_stage(&task, log_tx, None).await;
@@ -536,6 +548,9 @@ async fn test_challenge_6_concurrent_adversarial_fuzzing() {
             threads: 1,
             toolchain: None,
             exclusive: false,
+            max_concurrent_per_node: 1,
+            tasks: vec![],
+            sandbox_constraints: SandboxConstraintSpec::default(),
         };
 
         handles.push(tokio::spawn(async move {

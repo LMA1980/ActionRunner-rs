@@ -2,7 +2,7 @@
 # ==============================================================================
 # build-cross-toolchain.sh
 # Cross-Compilation Toolchain Builder for SpacemiT X100 (RISC-V 64-bit + RVV 1.0)
-# Designed for execution on x86_64 Debian GNU/Linux 13 (Trixie) - node 'rubicon'
+# Designed for execution on x86_64 Debian GNU/Linux 13 (Trixie) - node 'node-a'
 # ==============================================================================
 
 set -euo pipefail

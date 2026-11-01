@@ -18,6 +18,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
+use crate::concurrency::NodeConcurrencyLimiter;
 use crate::config::WorkerConfig;
 use crate::stage_runner::StageRunner;
 
@@ -43,6 +44,7 @@ async fn wait_for_shutdown_signal() {
 
 pub struct WorkerAgent {
     config: WorkerConfig,
+    limiter: Arc<NodeConcurrencyLimiter>,
     execution_gate: Arc<Semaphore>,
     active_slots: Arc<AtomicU32>,
     active_stages: Arc<RwLock<Vec<String>>>,
@@ -53,14 +55,22 @@ pub struct WorkerAgent {
 impl WorkerAgent {
     pub fn new(config: WorkerConfig) -> Self {
         let total_slots = config.max_slots.max(1);
+        let limiter = Arc::new(NodeConcurrencyLimiter::new(total_slots));
+        let execution_gate = limiter.semaphore();
         Self {
             config,
-            execution_gate: Arc::new(Semaphore::new(total_slots as usize)),
+            limiter,
+            execution_gate,
             active_slots: Arc::new(AtomicU32::new(0)),
             active_stages: Arc::new(RwLock::new(Vec::new())),
             active_processes: Arc::new(RwLock::new(HashMap::new())),
             cancelled_stages: Arc::new(RwLock::new(HashSet::new())),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn limiter(&self) -> Arc<NodeConcurrencyLimiter> {
+        self.limiter.clone()
     }
 
     #[allow(dead_code)]
@@ -314,7 +324,7 @@ impl WorkerAgent {
                                                 "Worker successfully deserialized StageDispatchTask"
                                             );
                                             let runner = stage_runner.clone();
-                                            let gate = self.execution_gate.clone();
+                                            let limiter = self.limiter.clone();
                                             let out_tx = outbound_tx.clone();
                                             let active_counter = self.active_slots.clone();
                                             let active_stages = self.active_stages.clone();
@@ -340,11 +350,7 @@ impl WorkerAgent {
                                                     "Awaiting execution gate permit(s) for stage"
                                                 );
 
-                                                let permit_res = if task.exclusive {
-                                                    gate.clone().acquire_many_owned(total_slots).await
-                                                } else {
-                                                    gate.clone().acquire_owned().await
-                                                };
+                                                let permit_res = limiter.acquire_for_task(&task).await;
 
                                                 let _permit = match permit_res {
                                                     Ok(p) => p,
@@ -380,6 +386,7 @@ impl WorkerAgent {
                                                             "Stage cancelled before permit acquisition"
                                                                 .to_string(),
                                                         ),
+                                                        security_grant_denied: None,
                                                     };
                                                     if let Ok(comp_payload) =
                                                         comp_fory.serialize(&report)
@@ -527,6 +534,7 @@ impl WorkerAgent {
                                                     exit_code: res.exit_code,
                                                     duration_secs: res.duration_secs,
                                                     error_message: res.error_message,
+                                                    security_grant_denied: res.security_grant_denied,
                                                 };
 
                                                 if let Ok(comp_payload) =

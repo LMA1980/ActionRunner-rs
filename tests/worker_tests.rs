@@ -1,7 +1,7 @@
 use action_runner::config::{IsolationMode, WorkerConfig};
 use action_runner::stage_runner::StageRunner;
 use action_runner::worker::WorkerAgent;
-use action_runner_ipc::{decode_log_batch, StageDispatchTask};
+use action_runner_ipc::{decode_log_batch, SandboxConstraintSpec, StageDispatchTask};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -48,6 +48,9 @@ async fn test_stage_runner_execution_and_log_batching() {
         threads: 2,
         toolchain: None,
         exclusive: false,
+        max_concurrent_per_node: 1,
+        tasks: vec![],
+        sandbox_constraints: SandboxConstraintSpec::default(),
     };
 
     let (started_tx, started_rx) = tokio::sync::oneshot::channel::<u32>();
@@ -238,6 +241,9 @@ async fn test_path_traversal_rejection_absolute_working_dir() {
         threads: 1,
         toolchain: None,
         exclusive: false,
+        max_concurrent_per_node: 1,
+        tasks: vec![],
+        sandbox_constraints: SandboxConstraintSpec::default(),
     };
 
     let res = runner.run_stage(&task, log_tx, None).await;
@@ -282,6 +288,9 @@ async fn test_path_traversal_rejection_parent_dir() {
         threads: 1,
         toolchain: None,
         exclusive: false,
+        max_concurrent_per_node: 1,
+        tasks: vec![],
+        sandbox_constraints: SandboxConstraintSpec::default(),
     };
 
     let res = runner.run_stage(&task, log_tx, None).await;
@@ -327,6 +336,9 @@ async fn test_path_traversal_rejection_malicious_repo_and_ids() {
         threads: 1,
         toolchain: None,
         exclusive: false,
+        max_concurrent_per_node: 1,
+        tasks: vec![],
+        sandbox_constraints: SandboxConstraintSpec::default(),
     };
     let res1 = runner.run_stage(&bad_repo_task, log_tx.clone(), None).await;
     assert_eq!(res1.exit_code, -1);
@@ -350,6 +362,9 @@ async fn test_path_traversal_rejection_malicious_repo_and_ids() {
         threads: 1,
         toolchain: None,
         exclusive: false,
+        max_concurrent_per_node: 1,
+        tasks: vec![],
+        sandbox_constraints: SandboxConstraintSpec::default(),
     };
     let res2 = runner.run_stage(&bad_job_task, log_tx.clone(), None).await;
     assert_eq!(res2.exit_code, -1);
@@ -370,6 +385,9 @@ async fn test_path_traversal_rejection_malicious_repo_and_ids() {
         threads: 1,
         toolchain: None,
         exclusive: false,
+        max_concurrent_per_node: 1,
+        tasks: vec![],
+        sandbox_constraints: SandboxConstraintSpec::default(),
     };
     let res3 = runner.run_stage(&bad_stage_task, log_tx, None).await;
     assert_eq!(res3.exit_code, -1);
