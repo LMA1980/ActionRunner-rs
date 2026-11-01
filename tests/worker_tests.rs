@@ -1,7 +1,9 @@
 use action_runner::config::{IsolationMode, WorkerConfig};
 use action_runner::stage_runner::StageRunner;
 use action_runner::worker::WorkerAgent;
-use action_runner_ipc::{decode_log_batch, SandboxConstraintSpec, StageDispatchTask};
+use action_runner_ipc::{
+    decode_log_batch, SandboxConstraintSpec, StageDispatchTask, TypedTaskInvocation,
+};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -41,7 +43,7 @@ async fn test_stage_runner_execution_and_log_batching() {
         repo_name: "LMA1980/test-repo".to_string(),
         clone_url: "".to_string(),
         commit_sha: "head".to_string(),
-        command: "echo 'Hello from StageRunner'; echo 'Second line output'".to_string(),
+        command: "".to_string(),
         working_dir: None,
         env_vars: vec![],
         timeout_seconds: 10,
@@ -49,7 +51,14 @@ async fn test_stage_runner_execution_and_log_batching() {
         toolchain: None,
         exclusive: false,
         max_concurrent_per_node: 1,
-        tasks: vec![],
+        tasks: vec![TypedTaskInvocation {
+            task_id: "t1".into(),
+            tool_name: "cargo-fmt".into(),
+            args: vec!["--version".into()],
+            working_dir: None,
+            env_vars: vec![],
+            sandbox: SandboxConstraintSpec::default(),
+        }],
         sandbox_constraints: SandboxConstraintSpec::default(),
     };
 
@@ -70,10 +79,10 @@ async fn test_stage_runner_execution_and_log_batching() {
     assert!(!all_logs.is_empty());
     assert!(all_logs
         .iter()
-        .any(|l| l.content.contains("Hello from StageRunner")));
+        .any(|l| l.content.contains("[ActionRunner-rs]")));
     assert!(all_logs
         .iter()
-        .any(|l| l.content.contains("Second line output")));
+        .any(|l| l.content.contains("cargo-fmt") || l.content.contains("rustfmt")));
 }
 
 #[test]

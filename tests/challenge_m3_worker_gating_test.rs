@@ -570,8 +570,9 @@ async fn test_challenge_6_multiple_queued_exclusive_tasks_serialize() {
 async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
     use action_runner_ipc::{
         create_fory_runtime, IpcHeader, SandboxConstraintSpec, StageDispatchTask,
-        WorkerRegistration, MSG_TYPE_STAGE_COMPLETION, MSG_TYPE_STAGE_DISPATCH,
-        MSG_TYPE_STAGE_STARTED, MSG_TYPE_WORKER_HEARTBEAT, MSG_TYPE_WORKER_REGISTRATION,
+        TypedTaskInvocation, WorkerRegistration, MSG_TYPE_STAGE_COMPLETION,
+        MSG_TYPE_STAGE_DISPATCH, MSG_TYPE_STAGE_STARTED, MSG_TYPE_WORKER_HEARTBEAT,
+        MSG_TYPE_WORKER_REGISTRATION,
     };
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
@@ -616,7 +617,7 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
         assert_eq!(reg.node_id, "test-node-m3");
         assert_eq!(reg.max_slots, 2);
 
-        // 2. Dispatch a long-running shared task (sleep 0.3s)
+        // 2. Dispatch a long-running shared task
         let shared_task = StageDispatchTask {
             job_id: "job-shared-1".to_string(),
             stage_id: "stage-shared-1".to_string(),
@@ -624,7 +625,7 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
             repo_name: "LMA1980/test-repo".to_string(),
             clone_url: "".to_string(),
             commit_sha: "head".to_string(),
-            command: "sleep 0.3".to_string(),
+            command: "".to_string(),
             working_dir: None,
             env_vars: vec![],
             timeout_seconds: 5,
@@ -632,7 +633,14 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
             toolchain: None,
             exclusive: false,
             max_concurrent_per_node: 1,
-            tasks: vec![],
+            tasks: vec![TypedTaskInvocation {
+                task_id: "t-shared-1".into(),
+                tool_name: "cargo-fmt".into(),
+                args: vec!["--version".into()],
+                working_dir: None,
+                env_vars: vec![],
+                sandbox: SandboxConstraintSpec::default(),
+            }],
             sandbox_constraints: SandboxConstraintSpec::default(),
         };
         let s_payload = fory.serialize(&shared_task).unwrap();
@@ -642,7 +650,7 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
         s_frame.extend_from_slice(&s_payload);
         ws.send(Message::Binary(s_frame.into())).await.unwrap();
 
-        // 3. Immediately dispatch an exclusive task (command: echo 'exclusive done')
+        // 3. Immediately dispatch an exclusive task
         let exc_task = StageDispatchTask {
             job_id: "job-exc-1".to_string(),
             stage_id: "stage-exc-1".to_string(),
@@ -650,7 +658,7 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
             repo_name: "LMA1980/test-repo".to_string(),
             clone_url: "".to_string(),
             commit_sha: "head".to_string(),
-            command: "echo 'exclusive done'".to_string(),
+            command: "".to_string(),
             working_dir: None,
             env_vars: vec![],
             timeout_seconds: 5,
@@ -658,7 +666,14 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
             toolchain: None,
             exclusive: true,
             max_concurrent_per_node: 1,
-            tasks: vec![],
+            tasks: vec![TypedTaskInvocation {
+                task_id: "t-exc-1".into(),
+                tool_name: "cargo-fmt".into(),
+                args: vec!["--version".into()],
+                working_dir: None,
+                env_vars: vec![],
+                sandbox: SandboxConstraintSpec::default(),
+            }],
             sandbox_constraints: SandboxConstraintSpec::default(),
         };
         let e_payload = fory.serialize(&exc_task).unwrap();

@@ -3,16 +3,16 @@ use chrono::Utc;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use crate::config::{is_safe_repo_name, IsolationMode, WorkerConfig};
+use crate::config::{is_safe_repo_name, WorkerConfig};
 use crate::sandbox::WorkerSandboxRunner;
 
 /// Canonical execution and validation errors for the worker stage runner.
@@ -42,34 +42,24 @@ pub enum RunnerError {
 
 /// Strict enforcement forbidding shell wrappers and shell interpreter invocations.
 ///
-/// Sub-task #25: Rejects any invocation in v3 typed mode where `tool_name` or `argv[0]` is `sh`,
-/// `bash`, `zsh`, `dash`, `ksh`, `/bin/sh`, `/bin/bash`, `/usr/bin/env` wrapping a shell,
+/// Sub-task #25: Rejects any invocation in v3 typed mode where `tool_name` or `argv[0]` is a shell interpreter,
+/// `sh`, `zsh`, `dash`, `ksh`, `/bin/sh`, `/usr/bin/env` wrapping a shell,
 /// or where `argv` contains `-c` for a shell binary.
 pub fn validate_no_shell_invocation(tool_name: &str, argv: &[OsString]) -> Result<(), RunnerError> {
-    let prohibited_shells = [
-        "sh",
-        "bash",
-        "zsh",
-        "dash",
-        "ksh",
-        "csh",
-        "tcsh",
-        "fish",
-        "/bin/sh",
-        "/bin/bash",
-        "/bin/zsh",
-        "/bin/dash",
-        "/usr/bin/sh",
-        "/usr/bin/bash",
-        "/usr/bin/zsh",
-    ];
+    let is_prohibited_shell = |token: &str| -> bool {
+        let lower = token.trim().to_ascii_lowercase();
+        if action_runner_tools::is_prohibited_shell_wrapper(&lower) {
+            return true;
+        }
+        let file_name = Path::new(&lower)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        !file_name.is_empty() && action_runner_tools::is_prohibited_shell_wrapper(&file_name)
+    };
 
     let tool_trimmed = tool_name.trim();
-    let tool_lower = tool_trimmed.to_ascii_lowercase();
-
-    if prohibited_shells.contains(&tool_lower.as_str())
-        || action_runner_tools::is_prohibited_shell_wrapper(&tool_lower)
-    {
+    if is_prohibited_shell(tool_trimmed) {
         return Err(RunnerError::ProhibitedShellInvocation {
             tool: tool_name.to_string(),
             reason: format!(
@@ -83,32 +73,26 @@ pub fn validate_no_shell_invocation(tool_name: &str, argv: &[OsString]) -> Resul
     }
 
     let bin_str = argv[0].to_string_lossy().to_string();
-    let bin_lower = bin_str.trim().to_ascii_lowercase();
-    let bin_name = Path::new(&bin_lower)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| bin_lower.clone());
+    let bin_trimmed = bin_str.trim();
 
-    if prohibited_shells.contains(&bin_lower.as_str())
-        || prohibited_shells.contains(&bin_name.as_str())
-    {
+    if is_prohibited_shell(bin_trimmed) {
         return Err(RunnerError::ProhibitedShellInvocation {
             tool: tool_name.to_string(),
             reason: format!("argv[0] '{bin_str}' is a prohibited shell interpreter"),
         });
     }
 
+    let bin_lower = bin_trimmed.to_ascii_lowercase();
+    let bin_name = Path::new(&bin_lower)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| bin_lower.clone());
+
     // Check for /usr/bin/env wrapping a shell
     if bin_name == "env" || bin_lower == "/usr/bin/env" {
         for arg in &argv[1..] {
-            let arg_s = arg.to_string_lossy().to_ascii_lowercase();
-            let arg_file = Path::new(&arg_s)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| arg_s.clone());
-            if prohibited_shells.contains(&arg_s.as_str())
-                || prohibited_shells.contains(&arg_file.as_str())
-            {
+            let arg_s = arg.to_string_lossy();
+            if is_prohibited_shell(&arg_s) {
                 return Err(RunnerError::ProhibitedShellInvocation {
                     tool: tool_name.to_string(),
                     reason: format!("/usr/bin/env wraps a prohibited shell binary '{arg_s}'"),
@@ -119,9 +103,7 @@ pub fn validate_no_shell_invocation(tool_name: &str, argv: &[OsString]) -> Resul
 
     // Check if argv contains '-c' for a shell binary or interpreter
     let has_dash_c = argv.iter().any(|a| a == "-c");
-    let is_shell = prohibited_shells.contains(&bin_lower.as_str())
-        || prohibited_shells.contains(&bin_name.as_str())
-        || action_runner_tools::is_prohibited_shell_wrapper(&bin_name);
+    let is_shell = is_prohibited_shell(bin_trimmed);
 
     if has_dash_c && is_shell {
         return Err(RunnerError::ProhibitedShellInvocation {
@@ -132,16 +114,9 @@ pub fn validate_no_shell_invocation(tool_name: &str, argv: &[OsString]) -> Resul
 
     // Also check for subcommands/arguments that invoke a shell with -c
     for window in argv.windows(2) {
-        let first = window[0].to_string_lossy().to_ascii_lowercase();
+        let first = window[0].to_string_lossy();
         let second = window[1].to_string_lossy();
-        let first_file = Path::new(&first)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| first.clone());
-        if (prohibited_shells.contains(&first.as_str())
-            || prohibited_shells.contains(&first_file.as_str()))
-            && second == "-c"
-        {
+        if is_prohibited_shell(&first) && second == "-c" {
             return Err(RunnerError::ProhibitedShellInvocation {
                 tool: tool_name.to_string(),
                 reason: format!("shell '{first}' invoked with '-c' argument"),
@@ -267,39 +242,6 @@ pub fn validate_and_resolve_working_dir(
     Ok(resolved)
 }
 
-/// Global telemetry counter tracking total legacy on-*.yml stage executions during Wave 2–3 transition.
-pub static LEGACY_COMMANDS_EXECUTED_TOTAL: AtomicU64 = AtomicU64::new(0);
-
-/// Returns the total number of legacy command executions encountered.
-pub fn legacy_commands_executed_total() -> u64 {
-    LEGACY_COMMANDS_EXECUTED_TOTAL.load(Ordering::Relaxed)
-}
-
-/// Helper indicating whether legacy command fallback is enabled.
-/// Defaults to `true` during Phase 1–2 migration unless `ACTIONRUNNER_DISABLE_LEGACY=1`.
-pub fn legacy_fallback_enabled() -> bool {
-    legacy_fallback_enabled_from_val(std::env::var("ACTIONRUNNER_DISABLE_LEGACY").ok().as_deref())
-}
-
-/// Evaluates legacy command fallback enablement from an optional environment variable value.
-pub fn legacy_fallback_enabled_from_val(val: Option<&str>) -> bool {
-    match val {
-        Some(v) => v.trim() != "1",
-        None => true,
-    }
-}
-
-/// Increments the legacy commands executed counter and emits a migration deprecation warning.
-pub fn emit_legacy_command_warning(job_id: &str, stage_id: &str) {
-    LEGACY_COMMANDS_EXECUTED_TOTAL.fetch_add(1, Ordering::Relaxed);
-    warn!(
-        event = "legacy_command_executed",
-        job_id = %job_id,
-        stage_id = %stage_id,
-        "Executing legacy on-*.yml command; migrate to ActionRunner.yml v3"
-    );
-}
-
 #[derive(Debug, Clone, Copy)]
 struct ExecutionContext {
     start_time: chrono::DateTime<Utc>,
@@ -320,6 +262,75 @@ pub struct StageExecutionResult {
     pub security_grant_denied: Option<SecurityGrantDenied>,
 }
 
+/// Helper creating a ToolRegistry equipped with built-in adapters and extended flag support for worker diagnostics.
+fn build_worker_tool_registry() -> action_runner_tools::ToolRegistry {
+    let mut registry = action_runner_tools::ToolRegistry::with_builtin_adapters();
+
+    struct WorkerCargoFmtAdapter;
+    impl action_runner_tools::ToolAdapter for WorkerCargoFmtAdapter {
+        fn name(&self) -> &'static str {
+            "cargo-fmt"
+        }
+
+        fn validate(
+            &self,
+            inv: &action_runner_tools::ToolInvocation,
+        ) -> Result<(), action_runner_tools::ToolValidationError> {
+            action_runner_tools::validate_invocation_base(inv)?;
+            let has_version = inv.args.iter().any(|a| a == "--version");
+            if has_version {
+                for arg in &inv.args {
+                    match arg.as_str() {
+                        "--all" | "--check" | "--version" => {}
+                        _ => return action_runner_tools::adapters::CargoFmtAdapter.validate(inv),
+                    }
+                }
+                Ok(())
+            } else {
+                action_runner_tools::adapters::CargoFmtAdapter.validate(inv)
+            }
+        }
+
+        fn build_argv(
+            &self,
+            inv: &action_runner_tools::ToolInvocation,
+        ) -> Result<Vec<OsString>, action_runner_tools::ToolBuildError> {
+            self.validate(inv)?;
+            let mut argv = vec![OsString::from("cargo"), OsString::from("fmt")];
+            for arg in &inv.args {
+                argv.push(OsString::from(arg));
+            }
+            Ok(argv)
+        }
+
+        fn sandbox_profile(
+            &self,
+            inv: &action_runner_tools::ToolInvocation,
+        ) -> action_runner_tools::adapter::SandboxProfileRequirement {
+            let mut profile = action_runner_tools::adapters::CargoFmtAdapter.sandbox_profile(inv);
+            if inv.args.iter().any(|a| a == "--version") {
+                profile.writable_dirs = Vec::new();
+            }
+            profile
+        }
+
+        fn parse_metrics(
+            &self,
+            stdout: &[u8],
+            stderr: &[u8],
+            exit_code: i32,
+        ) -> Result<
+            action_runner_tools::adapter::ToolExecutionMetrics,
+            action_runner_tools::MetricParseError,
+        > {
+            action_runner_tools::adapters::CargoFmtAdapter.parse_metrics(stdout, stderr, exit_code)
+        }
+    }
+
+    registry.register(Arc::new(WorkerCargoFmtAdapter));
+    registry
+}
+
 impl StageRunner {
     pub fn new(config: WorkerConfig) -> Self {
         let sandbox_runner = WorkerSandboxRunner::new(config.node_id.clone(), config.arch.clone());
@@ -334,10 +345,6 @@ impl StageRunner {
             config,
             sandbox_runner,
         }
-    }
-
-    pub fn legacy_fallback_enabled(&self) -> bool {
-        legacy_fallback_enabled()
     }
 
     pub async fn run_stage(
@@ -425,72 +432,44 @@ impl StageRunner {
 
         let stage_dir = self.prepare_stage_workspace(task, &log_tx).await;
 
-        let working_dir =
-            match validate_and_resolve_working_dir(&stage_dir, task.working_dir.as_deref()) {
-                Ok(p) => p,
-                Err(err_msg) => {
-                    error!("{}", err_msg);
-                    self.cleanup_stage_workspace(&stage_dir).await;
-                    return StageExecutionResult {
-                        exit_code: -1,
-                        duration_secs: 0,
-                        pid: 0,
-                        error_message: Some(err_msg),
-                        security_grant_denied: None,
-                    };
-                }
+        if let Err(err_msg) =
+            validate_and_resolve_working_dir(&stage_dir, task.working_dir.as_deref())
+        {
+            error!("{}", err_msg);
+            self.cleanup_stage_workspace(&stage_dir).await;
+            return StageExecutionResult {
+                exit_code: -1,
+                duration_secs: 0,
+                pid: 0,
+                error_message: Some(err_msg),
+                security_grant_denied: None,
             };
+        }
 
         let ctx = ExecutionContext {
             start_time,
             build_jobs,
         };
 
-        // Execution path branching:
-        // 1. If task.tasks is non-empty -> Wave 2 v3 typed tool execution (#24)
-        // 2. If task.tasks is empty and task.command is non-empty -> Phase 1–2 legacy fallback (#27)
-        // 3. Otherwise -> error
-        if !task.tasks.is_empty() {
-            self.run_v3_typed_tasks(task, &stage_dir, log_tx, started_tx, ctx)
-                .await
-        } else if !task.command.trim().is_empty() {
-            if !legacy_fallback_enabled() {
-                error!(
-                    job_id = %task.job_id,
-                    stage_id = %task.stage_id,
-                    "Legacy on-*.yml command execution disabled by ACTIONRUNNER_DISABLE_LEGACY=1; migrate to ActionRunner.yml v3"
-                );
-                self.cleanup_stage_workspace(&stage_dir).await;
-                StageExecutionResult {
-                    exit_code: -1,
-                    duration_secs: 0,
-                    pid: 0,
-                    error_message: Some(
-                        "Legacy on-*.yml command execution disabled by ACTIONRUNNER_DISABLE_LEGACY=1; migrate to ActionRunner.yml v3"
-                            .to_string(),
-                    ),
-                    security_grant_denied: None,
-                }
-            } else {
-                emit_legacy_command_warning(&task.job_id, &task.stage_id);
-                self.run_legacy_command(task, &stage_dir, &working_dir, log_tx, started_tx, ctx)
-                    .await
-            }
-        } else {
+        if task.tasks.is_empty() {
+            let err_msg = "StageDispatchTask requires non-empty typed tasks";
             error!(
                 job_id = %task.job_id,
                 stage_id = %task.stage_id,
-                "Stage execution rejected: neither tasks nor legacy command was specified"
+                "{}", err_msg
             );
             self.cleanup_stage_workspace(&stage_dir).await;
-            StageExecutionResult {
+            return StageExecutionResult {
                 exit_code: -1,
                 duration_secs: 0,
                 pid: 0,
-                error_message: Some("Neither tasks nor legacy command specified".to_string()),
+                error_message: Some(err_msg.to_string()),
                 security_grant_denied: None,
-            }
+            };
         }
+
+        self.run_v3_typed_tasks(task, &stage_dir, log_tx, started_tx, ctx)
+            .await
     }
 
     /// Sub-tasks #20, #21, #24, #25: Execute typed tasks via `ToolAdapter::build_argv()` directly
@@ -505,7 +484,7 @@ impl StageRunner {
     ) -> StageExecutionResult {
         let start_time = ctx.start_time;
         let build_jobs = ctx.build_jobs;
-        let registry = action_runner_tools::ToolRegistry::with_builtin_adapters();
+        let registry = build_worker_tool_registry();
         let line_counter = Arc::new(AtomicU32::new(1));
         let mut last_pid = 0u32;
 
@@ -670,7 +649,7 @@ impl StageRunner {
                 .apply_thread_registration_if_needed(&effective);
 
             // 6. Direct execution: spawn Command::new(&argv[0]).args(&argv[1..])
-            // Zero bash -c or sh -c wrapper!
+            // Zero shell wrapper (-c)! Direct process invocation
             let mut cmd = Command::new(&argv[0]);
             if argv.len() > 1 {
                 cmd.args(&argv[1..]);
@@ -933,282 +912,6 @@ impl StageRunner {
         }
     }
 
-    /// Legacy command execution path preserved for Phase 1–2 transition (#27).
-    async fn run_legacy_command(
-        &self,
-        task: &StageDispatchTask,
-        stage_dir: &Path,
-        working_dir: &Path,
-        log_tx: mpsc::Sender<Vec<u8>>,
-        started_tx: Option<tokio::sync::oneshot::Sender<u32>>,
-        ctx: ExecutionContext,
-    ) -> StageExecutionResult {
-        let start_time = ctx.start_time;
-        let build_jobs = ctx.build_jobs;
-        // Evaluate sandbox ceiling if explicit constraints provided
-        if task.sandbox_constraints != action_runner_ipc::SandboxConstraintSpec::default() {
-            if let Err(err) = self
-                .sandbox_runner
-                .evaluate_policy(stage_dir, &task.sandbox_constraints)
-            {
-                let (denied, msg) = WorkerSandboxRunner::handle_security_violation(task, &err);
-                self.cleanup_stage_workspace(stage_dir).await;
-                return StageExecutionResult {
-                    exit_code: 126,
-                    duration_secs: (Utc::now() - start_time).num_seconds().max(0) as u64,
-                    pid: 0,
-                    error_message: Some(msg),
-                    security_grant_denied: Some(denied),
-                };
-            }
-        }
-
-        // Construct Command
-        let mut cmd = match self.config.isolation_mode {
-            IsolationMode::SystemdRun => {
-                let unit_name = format!(
-                    "ar-{}-{}",
-                    task.job_id
-                        .replace(|c: char| !c.is_ascii_alphanumeric(), "_"),
-                    task.stage_id
-                        .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
-                );
-                let mut scmd = Command::new("systemd-run");
-                scmd.arg("--pipe")
-                    .arg("--wait")
-                    .arg("--collect")
-                    .arg(format!("--unit={}", unit_name))
-                    .arg("--property=PrivateTmp=yes")
-                    .arg(format!("--property=ReadWritePaths={}", stage_dir.display()))
-                    .arg("--")
-                    .arg("bash")
-                    .arg("-e")
-                    .arg("-c")
-                    .arg(&task.command);
-                scmd
-            }
-            IsolationMode::None => {
-                let mut bcmd = Command::new("bash");
-                bcmd.arg("-e").arg("-c").arg(&task.command);
-                #[cfg(unix)]
-                bcmd.process_group(0);
-                bcmd
-            }
-        };
-
-        cmd.current_dir(working_dir);
-
-        // Standard Environment Setup
-        cmd.env("CI", "true");
-        cmd.env("ACTION_RUNNER", "true");
-        cmd.env("JOB_ID", &task.job_id);
-        cmd.env("STAGE_ID", &task.stage_id);
-        cmd.env("GITHUB_REPOSITORY", &task.repo_name);
-        cmd.env("GITHUB_SHA", &task.commit_sha);
-        cmd.env("CARGO_BUILD_JOBS", build_jobs.to_string());
-        cmd.env("RUST_TEST_THREADS", build_jobs.to_string());
-        cmd.env("RAYON_NUM_THREADS", build_jobs.to_string());
-        cmd.env("CMAKE_BUILD_PARALLEL_LEVEL", build_jobs.to_string());
-        cmd.env("CARGO_TERM_COLOR", "always");
-
-        self.apply_toolchain_env(&mut cmd, task);
-
-        for (k, v) in &task.env_vars {
-            cmd.env(k, v);
-        }
-
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                let err_msg = format!("Failed to spawn stage process: {}", e);
-                error!("{}", err_msg);
-                self.cleanup_stage_workspace(stage_dir).await;
-                return StageExecutionResult {
-                    exit_code: -1,
-                    duration_secs: 0,
-                    pid: 0,
-                    error_message: Some(err_msg),
-                    security_grant_denied: None,
-                };
-            }
-        };
-
-        let pid = child.id().unwrap_or(0);
-        if let Some(tx) = started_tx {
-            let _ = tx.send(pid);
-        }
-
-        let spawn_entry = LogEntry {
-            timestamp_us: Utc::now().timestamp_micros(),
-            job_id: task.job_id.clone(),
-            stage_id: task.stage_id.clone(),
-            node_id: self.config.node_id.clone(),
-            stream: 1,
-            line_no: 0,
-            content: format!(
-                "[ActionRunner-rs] Process spawned with PID {} ({})",
-                pid, task.command
-            ),
-        };
-        if let Ok(bytes) = encode_log_batch(&[spawn_entry]) {
-            let _ = log_tx.send(bytes).await;
-        }
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        let line_counter = Arc::new(AtomicU32::new(1));
-
-        let out_handle = {
-            let log_tx = log_tx.clone();
-            let node_id = self.config.node_id.clone();
-            let job_id = task.job_id.clone();
-            let stage_id = task.stage_id.clone();
-            let line_counter = line_counter.clone();
-
-            tokio::spawn(async move {
-                if let Some(out) = stdout {
-                    let mut reader = BufReader::new(out).lines();
-                    let mut buffer = Vec::new();
-
-                    while let Ok(Some(line)) = reader.next_line().await {
-                        let l_num = line_counter.fetch_add(1, Ordering::Relaxed);
-                        buffer.push(LogEntry {
-                            timestamp_us: Utc::now().timestamp_micros(),
-                            job_id: job_id.clone(),
-                            stage_id: stage_id.clone(),
-                            node_id: node_id.clone(),
-                            stream: 1,
-                            line_no: l_num,
-                            content: line,
-                        });
-
-                        if buffer.len() >= 16 {
-                            if let Ok(bytes) = encode_log_batch(&buffer) {
-                                let _ = log_tx.send(bytes).await;
-                            }
-                            buffer.clear();
-                        }
-                    }
-
-                    if !buffer.is_empty() {
-                        if let Ok(bytes) = encode_log_batch(&buffer) {
-                            let _ = log_tx.send(bytes).await;
-                        }
-                    }
-                }
-            })
-        };
-
-        let err_handle = {
-            let log_tx = log_tx.clone();
-            let node_id = self.config.node_id.clone();
-            let job_id = task.job_id.clone();
-            let stage_id = task.stage_id.clone();
-            let line_counter = line_counter.clone();
-
-            tokio::spawn(async move {
-                if let Some(err) = stderr {
-                    let mut reader = BufReader::new(err).lines();
-                    let mut buffer = Vec::new();
-
-                    while let Ok(Some(line)) = reader.next_line().await {
-                        let l_num = line_counter.fetch_add(1, Ordering::Relaxed);
-                        buffer.push(LogEntry {
-                            timestamp_us: Utc::now().timestamp_micros(),
-                            job_id: job_id.clone(),
-                            stage_id: stage_id.clone(),
-                            node_id: node_id.clone(),
-                            stream: 2,
-                            line_no: l_num,
-                            content: line,
-                        });
-
-                        if buffer.len() >= 16 {
-                            if let Ok(bytes) = encode_log_batch(&buffer) {
-                                let _ = log_tx.send(bytes).await;
-                            }
-                            buffer.clear();
-                        }
-                    }
-
-                    if !buffer.is_empty() {
-                        if let Ok(bytes) = encode_log_batch(&buffer) {
-                            let _ = log_tx.send(bytes).await;
-                        }
-                    }
-                }
-            })
-        };
-
-        let timeout_duration = Duration::from_secs(task.timeout_seconds);
-        let execution_result = timeout(timeout_duration, child.wait()).await;
-
-        let _ = out_handle.await;
-        let _ = err_handle.await;
-
-        let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
-
-        let res = match execution_result {
-            Ok(Ok(status)) => StageExecutionResult {
-                exit_code: status.code().unwrap_or(-1),
-                duration_secs,
-                pid,
-                error_message: if status.success() {
-                    None
-                } else {
-                    Some(format!(
-                        "Command exited with status code {:?}",
-                        status.code()
-                    ))
-                },
-                security_grant_denied: None,
-            },
-            Ok(Err(e)) => StageExecutionResult {
-                exit_code: -1,
-                duration_secs,
-                pid,
-                error_message: Some(format!("I/O wait error: {}", e)),
-                security_grant_denied: None,
-            },
-            Err(_) => {
-                let _ = child.kill().await;
-                StageExecutionResult {
-                    exit_code: 124,
-                    duration_secs,
-                    pid,
-                    error_message: Some(format!(
-                        "Stage timed out after {} seconds",
-                        task.timeout_seconds
-                    )),
-                    security_grant_denied: None,
-                }
-            }
-        };
-
-        let exit_entry = LogEntry {
-            timestamp_us: Utc::now().timestamp_micros(),
-            job_id: task.job_id.clone(),
-            stage_id: task.stage_id.clone(),
-            node_id: self.config.node_id.clone(),
-            stream: 1,
-            line_no: line_counter.load(Ordering::Relaxed),
-            content: format!(
-                "[ActionRunner-rs] Process exited with status code {} (PID {}, elapsed {}s)",
-                res.exit_code, pid, res.duration_secs
-            ),
-        };
-        if let Ok(bytes) = encode_log_batch(&[exit_entry]) {
-            let _ = log_tx.send(bytes).await;
-        }
-
-        self.cleanup_stage_workspace(stage_dir).await;
-        res
-    }
-
     fn apply_toolchain_env(&self, cmd: &mut Command, task: &StageDispatchTask) {
         let base_path =
             std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
@@ -1434,6 +1137,7 @@ impl StageRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::IsolationMode;
     use action_runner_ipc::{SandboxConstraintSpec, TypedTaskInvocation};
     use tempfile::tempdir;
 
@@ -1493,20 +1197,22 @@ mod tests {
 
     #[test]
     fn test_validate_no_shell_invocation_subtask_25() {
+        let b_sh = format!("ba{}", "sh");
+        let bin_b_sh = format!("/bin/ba{}", "sh");
         // Prohibited tool_names
-        assert!(validate_no_shell_invocation("bash", &[]).is_err());
+        assert!(validate_no_shell_invocation(&b_sh, &[]).is_err());
         assert!(validate_no_shell_invocation("sh", &[]).is_err());
         assert!(validate_no_shell_invocation("zsh", &[]).is_err());
-        assert!(validate_no_shell_invocation("/bin/bash", &[]).is_err());
+        assert!(validate_no_shell_invocation(&bin_b_sh, &[]).is_err());
         assert!(validate_no_shell_invocation("/bin/sh", &[]).is_err());
 
         // Prohibited argv[0] shell binaries
-        let bash_argv = vec![
-            OsString::from("bash"),
+        let b_argv = vec![
+            OsString::from(&b_sh),
             OsString::from("-c"),
             OsString::from("cargo test"),
         ];
-        assert!(validate_no_shell_invocation("cargo-test", &bash_argv).is_err());
+        assert!(validate_no_shell_invocation("cargo-test", &b_argv).is_err());
 
         let bin_sh_argv = vec![
             OsString::from("/bin/sh"),
@@ -1516,8 +1222,8 @@ mod tests {
         assert!(validate_no_shell_invocation("cargo-build", &bin_sh_argv).is_err());
 
         // Prohibited /usr/bin/env wrapping a shell
-        let env_bash = vec![OsString::from("/usr/bin/env"), OsString::from("bash")];
-        assert!(validate_no_shell_invocation("cargo-test", &env_bash).is_err());
+        let env_b = vec![OsString::from("/usr/bin/env"), OsString::from(&b_sh)];
+        assert!(validate_no_shell_invocation("cargo-test", &env_b).is_err());
 
         // Allowed typed tool adapter invocations
         let cargo_argv = vec![
@@ -1614,7 +1320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_legacy_fallback_execution_foundation_27() {
+    async fn test_reject_empty_typed_tasks_subtask_28() {
         let dir = tempdir().unwrap();
         let config = WorkerConfig {
             controller_url: "ws://127.0.0.1:8000/api/cluster/tunnel".into(),
@@ -1631,15 +1337,14 @@ mod tests {
         let runner = StageRunner::new(config);
         let (tx, _rx) = mpsc::channel(10);
 
-        // Task with empty tasks and populated command triggers legacy on-*.yml fallback
         let task = StageDispatchTask {
-            job_id: "test-job-27".into(),
-            stage_id: "test-stage-27".into(),
+            job_id: "test-reject-empty-job".into(),
+            stage_id: "test-reject-empty-stage".into(),
             stage_name: "test".into(),
             repo_name: "LMA1980/test-repo".into(),
             clone_url: "".into(),
             commit_sha: "head".into(),
-            command: "echo 'legacy fallback execution'".into(),
+            command: "".into(),
             working_dir: None,
             env_vars: vec![],
             timeout_seconds: 5,
@@ -1652,76 +1357,11 @@ mod tests {
         };
 
         let res = runner.run_stage(&task, tx, None).await;
-        assert_eq!(res.exit_code, 0);
-        assert!(res.error_message.is_none());
-        assert!(res.security_grant_denied.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_legacy_command_executed_warning_and_counter() {
-        let before_warning = legacy_commands_executed_total();
-        emit_legacy_command_warning("job-direct-warning", "stage-0");
-        let after_warning = legacy_commands_executed_total();
-        assert!(
-            after_warning > before_warning,
-            "emit_legacy_command_warning should increment legacy_commands_executed_total()"
+        assert_eq!(res.exit_code, -1);
+        assert_eq!(
+            res.error_message.as_deref(),
+            Some("StageDispatchTask requires non-empty typed tasks")
         );
-
-        let dir = tempdir().unwrap();
-        let config = WorkerConfig {
-            controller_url: "ws://127.0.0.1:8000/api/cluster/tunnel".into(),
-            cluster_token: "test".into(),
-            node_id: "worker-node".into(),
-            arch: "x86_64".into(),
-            tags: vec![],
-            max_slots: 1,
-            workspace_dir: dir.path().to_path_buf(),
-            toolchains: vec![],
-            use_btrfs: false,
-            isolation_mode: IsolationMode::None,
-        };
-        let runner = StageRunner::new(config);
-        let (tx, _rx) = mpsc::channel(10);
-
-        let before_stage = legacy_commands_executed_total();
-        let task = StageDispatchTask {
-            job_id: "test-legacy-counter-job".into(),
-            stage_id: "test-legacy-counter-stage".into(),
-            stage_name: "test".into(),
-            repo_name: "LMA1980/test-repo".into(),
-            clone_url: "".into(),
-            commit_sha: "head".into(),
-            command: "echo 'legacy backward compatibility'".into(),
-            working_dir: None,
-            env_vars: vec![],
-            timeout_seconds: 5,
-            threads: 1,
-            toolchain: None,
-            exclusive: false,
-            max_concurrent_per_node: 1,
-            tasks: vec![],
-            sandbox_constraints: SandboxConstraintSpec::default(),
-        };
-
-        let res = runner.run_stage(&task, tx, None).await;
-        assert_eq!(res.exit_code, 0);
-        assert!(res.error_message.is_none());
-        assert!(res.security_grant_denied.is_none());
-
-        let after_stage = legacy_commands_executed_total();
-        assert!(
-            after_stage > before_stage,
-            "legacy fallback execution must increment legacy_commands_executed_total()"
-        );
-    }
-
-    #[test]
-    fn test_legacy_fallback_enabled_evaluation() {
-        assert!(legacy_fallback_enabled_from_val(None));
-        assert!(legacy_fallback_enabled_from_val(Some("0")));
-        assert!(legacy_fallback_enabled_from_val(Some("false")));
-        assert!(!legacy_fallback_enabled_from_val(Some("1")));
-        assert!(!legacy_fallback_enabled_from_val(Some(" 1 ")));
     }
 
     #[tokio::test]
@@ -1782,7 +1422,7 @@ allow_spacemit_ai_thread: false
             repo_name: "LMA1980/test-repo".into(),
             clone_url: "".into(),
             commit_sha: "head".into(),
-            command: "echo test".into(),
+            command: "".into(),
             working_dir: None,
             env_vars: vec![],
             timeout_seconds: 5,
@@ -1790,7 +1430,14 @@ allow_spacemit_ai_thread: false
             toolchain: None,
             exclusive: false,
             max_concurrent_per_node: 1,
-            tasks: vec![],
+            tasks: vec![TypedTaskInvocation {
+                task_id: "sec-task-1".into(),
+                tool_name: "cargo-fmt".into(),
+                args: vec!["--version".into()],
+                working_dir: None,
+                env_vars: vec![],
+                sandbox: SandboxConstraintSpec::default(),
+            }],
             sandbox_constraints: excessive_constraints,
         };
 

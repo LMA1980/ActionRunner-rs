@@ -2,7 +2,7 @@ use action_runner::config::{is_safe_repo_name, IsolationMode, WorkerConfig};
 use action_runner::stage_runner::{
     is_safe_identifier, sanitize_path_segment, validate_and_resolve_working_dir, StageRunner,
 };
-use action_runner_ipc::{SandboxConstraintSpec, StageDispatchTask};
+use action_runner_ipc::{SandboxConstraintSpec, StageDispatchTask, TypedTaskInvocation};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -472,7 +472,7 @@ async fn test_challenge_5_workspace_isolation_and_cleanup_boundary() {
         repo_name: "LMA1980/test-repo".to_string(),
         clone_url: "".to_string(),
         commit_sha: "head".to_string(),
-        command: "echo 'execution clean'".to_string(),
+        command: "".to_string(),
         working_dir: None,
         env_vars: vec![],
         timeout_seconds: 5,
@@ -480,7 +480,14 @@ async fn test_challenge_5_workspace_isolation_and_cleanup_boundary() {
         toolchain: None,
         exclusive: false,
         max_concurrent_per_node: 1,
-        tasks: vec![],
+        tasks: vec![TypedTaskInvocation {
+            task_id: "clean-1".into(),
+            tool_name: "cargo-fmt".into(),
+            args: vec!["--version".into()],
+            working_dir: None,
+            env_vars: vec![],
+            sandbox: SandboxConstraintSpec::default(),
+        }],
         sandbox_constraints: SandboxConstraintSpec::default(),
     };
 
