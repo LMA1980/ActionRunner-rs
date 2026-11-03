@@ -998,6 +998,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_telemetry_emitter_streams_muob_batches_to_mock_collector() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
         let addr = listener.local_addr().expect("local addr");

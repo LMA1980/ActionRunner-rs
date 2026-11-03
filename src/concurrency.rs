@@ -162,6 +162,7 @@ pub mod tests {
     use tokio::time::sleep;
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_exclusive_waits_for_shared_to_drain() {
         let limiter = Arc::new(NodeConcurrencyLimiter::new(4));
 
@@ -203,6 +204,7 @@ pub mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_shared_waits_for_exclusive_to_release() {
         let limiter = Arc::new(NodeConcurrencyLimiter::new(4));
 
@@ -234,6 +236,7 @@ pub mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn lock_released_on_panic_and_cancel() {
         let limiter = Arc::new(NodeConcurrencyLimiter::new(2));
 
@@ -327,6 +330,7 @@ pub mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_multiple_queued_exclusive_tasks_serialize() {
         let limiter = Arc::new(NodeConcurrencyLimiter::new(2));
         let active_count = Arc::new(AtomicU32::new(0));
