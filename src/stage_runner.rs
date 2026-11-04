@@ -1306,11 +1306,11 @@ impl StageRunner {
                     format!("{}:{}", llvm_bin, base_path)
                 };
                 envs.push(("PATH", path_val));
-                envs.push((
-                    "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS",
-                    "-C target-feature=+v -C target-cpu=spacemit-x100".to_string(),
-                ));
                 if is_cross {
+                    envs.push((
+                        "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+                        "-C target-feature=+v -C target-cpu=spacemit-x100 -C link-arg=--target=riscv64-linux-gnu -C link-arg=--sysroot=/ -C link-arg=-fuse-ld=lld".to_string(),
+                    ));
                     envs.push((
                         "CARGO_BUILD_TARGET",
                         "riscv64gc-unknown-linux-gnu".to_string(),
@@ -1323,11 +1323,11 @@ impl StageRunner {
                     envs.push(("CXX_riscv64gc_unknown_linux_gnu", "clang++".to_string()));
                     envs.push((
                         "CFLAGS_riscv64gc_unknown_linux_gnu",
-                        "--target=riscv64-unknown-linux-gnu --sysroot=/usr/riscv64-linux-gnu -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
+                        "--target=riscv64-linux-gnu --sysroot=/ -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
                     ));
                     envs.push((
                         "CXXFLAGS_riscv64gc_unknown_linux_gnu",
-                        "--target=riscv64-unknown-linux-gnu --sysroot=/usr/riscv64-linux-gnu -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
+                        "--target=riscv64-linux-gnu --sysroot=/ -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
                     ));
                     info!(
                         toolchain = "llvm-24",
@@ -1335,6 +1335,10 @@ impl StageRunner {
                         "Injected cross-compile LLVM 24 environment targeting riscv64gc-unknown-linux-gnu (RVV 1.0 + spacemit-x100)"
                     );
                 } else {
+                    envs.push((
+                        "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+                        "-C target-feature=+v -C target-cpu=spacemit-x100".to_string(),
+                    ));
                     envs.push(("CC", "clang".to_string()));
                     envs.push(("CXX", "clang++".to_string()));
                     envs.push((
@@ -2293,7 +2297,7 @@ allow_spacemit_ai_thread: false
             cross_envs
                 .get("CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS")
                 .map(String::as_str),
-            Some("-C target-feature=+v -C target-cpu=spacemit-x100")
+            Some("-C target-feature=+v -C target-cpu=spacemit-x100 -C link-arg=--target=riscv64-linux-gnu -C link-arg=--sysroot=/ -C link-arg=-fuse-ld=lld")
         );
         // Host RUSTFLAGS must not be set on x86_64 cross-builds so host build.rs/proc-macros compile cleanly
         assert!(!cross_envs.contains_key("RUSTFLAGS"));

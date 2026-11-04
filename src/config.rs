@@ -61,18 +61,21 @@ impl WorkerConfig {
             .unwrap_or_else(|_| PathBuf::from("/var/lib/action-runner/workspace"));
 
         let mut toolchains = vec!["system".to_string()];
-        if Path::new("/opt/llvm-24-spacemit-x100").exists()
-            || Path::new("/home/lma1980/opt/llvm-24").exists()
-            || Path::new("/opt/cross-llvm-24").exists()
+        if Path::new("/opt/llvm-24-spacemit-x100/bin/clang").exists()
+            || Path::new("/home/lma1980/opt/llvm-24/bin/clang").exists()
+            || Path::new("/opt/cross-llvm-24/bin/clang").exists()
         {
             toolchains.push("llvm-24".to_string());
         }
-        if Path::new("/opt/gcc-17-spacemit-x100").exists()
-            || Path::new("/home/lma1980/opt/gcc-17-spacemit-x100").exists()
-            || Path::new("/opt/cross-gcc-17").exists()
+        if Path::new("/opt/gcc-17-spacemit-x100/bin/riscv64-unknown-linux-gnu-gcc").exists()
+            || Path::new("/opt/gcc-17-spacemit-x100/bin/gcc").exists()
+            || Path::new("/home/lma1980/opt/gcc-17-spacemit-x100/bin/riscv64-unknown-linux-gnu-gcc")
+                .exists()
+            || Path::new("/home/lma1980/opt/gcc-17-spacemit-x100/bin/gcc").exists()
+            || Path::new("/opt/cross-gcc-17/bin/riscv64-unknown-linux-gnu-gcc").exists()
         {
             toolchains.push("gcc-17-spacemit-x100".to_string());
-        } else if Path::new("/home/lma1980/opt/gcc-17").exists() {
+        } else if Path::new("/home/lma1980/opt/gcc-17/bin/gcc").exists() {
             toolchains.push("gcc-17".to_string());
         }
 
