@@ -81,6 +81,7 @@ async fn test_challenge_1_working_dir_path_traversal() {
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
             traceparent: None,
+            sccache_mode: Default::default(),
         };
 
         let res = runner.run_stage(&task, log_tx.clone(), None).await;
@@ -194,6 +195,7 @@ async fn test_challenge_2_repo_name_validation_and_traversal() {
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
             traceparent: None,
+            sccache_mode: Default::default(),
         };
 
         let res = runner.run_stage(&task, log_tx.clone(), None).await;
@@ -277,6 +279,7 @@ async fn test_challenge_3_job_and_stage_id_traversal() {
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
             traceparent: None,
+            sccache_mode: Default::default(),
         };
 
         let res = runner.run_stage(&task, log_tx.clone(), None).await;
@@ -490,9 +493,11 @@ async fn test_challenge_5_workspace_isolation_and_cleanup_boundary() {
             working_dir: None,
             env_vars: vec![],
             sandbox: SandboxConstraintSpec::default(),
+            sccache_mode: Default::default(),
         }],
         sandbox_constraints: SandboxConstraintSpec::default(),
         traceparent: None,
+        sccache_mode: Default::default(),
     };
 
     let res = runner.run_stage(&task, log_tx, None).await;
@@ -563,6 +568,7 @@ async fn test_challenge_6_concurrent_adversarial_fuzzing() {
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
             traceparent: None,
+            sccache_mode: Default::default(),
         };
 
         handles.push(tokio::spawn(async move {

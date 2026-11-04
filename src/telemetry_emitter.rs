@@ -831,6 +831,7 @@ mod tests {
                 ..SandboxConstraintSpec::default()
             },
             traceparent: traceparent.map(ToString::to_string),
+            sccache_mode: Default::default(),
         }
     }
 

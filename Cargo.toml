@@ -7,7 +7,7 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/LMA1980/ActionRunner-rs"
 
 [dependencies]
-action-runner-ipc = { git = "https://github.com/LMA1980/ActionRunner-ipc.git", branch = "main" }
+action-runner-ipc = { git = "https://github.com/LMA1980/ActionRunner-ipc.git", branch = "feat/sccache-support" }
 action-runner-tools = { git = "https://github.com/LMA1980/ActionRunner-tools.git", branch = "main" }
 mu-isolation = { git = "https://github.com/LMA1980/MuIsolation.git", branch = "main" }
 muobserve-ipc = { git = "https://github.com/LMA1980/MuObserve-ipc.git", branch = "main" }
