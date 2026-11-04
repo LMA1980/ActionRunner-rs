@@ -1435,6 +1435,8 @@ impl StageRunner {
                 .arg("snapshot")
                 .arg(&repo_cache)
                 .arg(&stage_dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
                 .await;
 
@@ -1546,14 +1548,27 @@ impl StageRunner {
         }
 
         if self.config.use_btrfs {
-            let res = Command::new("btrfs")
+            let is_subvol = Command::new("btrfs")
                 .arg("subvolume")
-                .arg("delete")
+                .arg("show")
                 .arg(stage_dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
-                .await;
-            if res.is_ok() && !stage_dir.exists() {
-                return;
+                .await
+                .is_ok_and(|s| s.success());
+            if is_subvol {
+                let res = Command::new("btrfs")
+                    .arg("subvolume")
+                    .arg("delete")
+                    .arg(stage_dir)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+                if res.is_ok() && !stage_dir.exists() {
+                    return;
+                }
             }
         }
         let _ = tokio::fs::remove_dir_all(stage_dir).await;
