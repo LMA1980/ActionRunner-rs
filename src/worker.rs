@@ -260,7 +260,11 @@ impl WorkerAgent {
         });
 
         let stage_runner = Arc::new(StageRunner::new(self.config.clone()));
-        let liveness_timeout = Duration::from_secs(15);
+        let liveness_timeout = std::env::var("ACTION_RUNNER_LIVENESS_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(120));
         let mut liveness_deadline = tokio::time::Instant::now() + liveness_timeout;
 
         loop {
