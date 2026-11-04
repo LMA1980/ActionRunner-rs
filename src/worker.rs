@@ -260,9 +260,20 @@ impl WorkerAgent {
         });
 
         let stage_runner = Arc::new(StageRunner::new(self.config.clone()));
+        let liveness_timeout = Duration::from_secs(15);
+        let mut liveness_deadline = tokio::time::Instant::now() + liveness_timeout;
 
         loop {
             tokio::select! {
+                _ = tokio::time::sleep_until(liveness_deadline) => {
+                    warn!(
+                        node = %self.config.node_id,
+                        timeout_secs = liveness_timeout.as_secs(),
+                        "Coordinator tunnel read-liveness deadline expired without Pong or inbound frame; disconnecting to trigger reconnect"
+                    );
+                    break;
+                }
+
                 _ = shutdown_watch.changed() => {
                     if *shutdown_watch.borrow() {
                         info!("Received shutdown signal; notifying coordinator before disconnecting");
@@ -301,7 +312,33 @@ impl WorkerAgent {
 
                 // Outbound messages to send to coordinator
                 Some(frame) = outbound_rx.recv() => {
-                    ws_sender.send(Message::Binary(frame.into())).await?;
+                    let is_hb = IpcHeader::parse(&frame)
+                        .map(|(hdr, _)| hdr.msg_type == MSG_TYPE_WORKER_HEARTBEAT)
+                        .unwrap_or(false);
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        ws_sender.send(Message::Binary(frame.into())),
+                    )
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Timed out sending binary frame to coordinator",
+                        )
+                    })??;
+                    if is_hb {
+                        tokio::time::timeout(
+                            Duration::from_secs(10),
+                            ws_sender.send(Message::Ping(Vec::new().into())),
+                        )
+                        .await
+                        .map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "Timed out sending WebSocket Ping to coordinator",
+                            )
+                        })??;
+                    }
                 }
 
                 // Inbound messages received from coordinator
@@ -310,6 +347,21 @@ impl WorkerAgent {
                         Some(Ok(m)) => m,
                         _ => break, // Disconnected
                     };
+                    liveness_deadline = tokio::time::Instant::now() + liveness_timeout;
+
+                    match &msg {
+                        Message::Ping(payload) => {
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(10),
+                                ws_sender.send(Message::Pong(payload.clone())),
+                            )
+                            .await;
+                            continue;
+                        }
+                        Message::Pong(_) => continue,
+                        Message::Close(_) => break,
+                        _ => {}
+                    }
 
                     if let Message::Binary(bin) = msg {
                         match IpcHeader::parse(&bin) {

@@ -1239,48 +1239,147 @@ impl StageRunner {
         }
     }
 
-    fn apply_toolchain_env(&self, cmd: &mut Command, task: &StageDispatchTask) {
-        let base_path =
-            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+    fn compute_toolchain_env(
+        &self,
+        task: &StageDispatchTask,
+        base_path: &str,
+    ) -> Vec<(&'static str, String)> {
+        let mut envs = Vec::new();
+        let is_cross = self.config.arch != "riscv64";
 
         match task.toolchain.as_deref() {
             Some("llvm-24") => {
-                let llvm_bin = if Path::new("/home/lma1980/opt/llvm-24/bin").exists() {
+                let llvm_bin = if Path::new("/opt/llvm-24-spacemit-x100/bin").exists() {
+                    "/opt/llvm-24-spacemit-x100/bin"
+                } else if Path::new("/home/lma1980/opt/llvm-24/bin").exists() {
                     "/home/lma1980/opt/llvm-24/bin"
                 } else {
                     "/opt/cross-llvm-24/bin"
                 };
-                cmd.env("PATH", format!("{}:{}", llvm_bin, base_path));
-                cmd.env("CC", "clang");
-                cmd.env("CXX", "clang++");
-                cmd.env(
-                    "RUSTFLAGS",
-                    "-C target-feature=+v -C target-cpu=spacemit-x100",
-                );
-                info!(
-                    toolchain = "llvm-24",
-                    "Injected LLVM 24 environment with RVV 1.0 flags"
-                );
+                let gcc_bin = if Path::new("/opt/gcc-17-spacemit-x100/bin").exists() {
+                    Some("/opt/gcc-17-spacemit-x100/bin")
+                } else if Path::new("/home/lma1980/opt/gcc-17-spacemit-x100/bin").exists() {
+                    Some("/home/lma1980/opt/gcc-17-spacemit-x100/bin")
+                } else if Path::new("/opt/cross-gcc-17/bin").exists() {
+                    Some("/opt/cross-gcc-17/bin")
+                } else {
+                    None
+                };
+                let path_val = if let Some(gcc) = gcc_bin {
+                    format!("{}:{}:{}", llvm_bin, gcc, base_path)
+                } else {
+                    format!("{}:{}", llvm_bin, base_path)
+                };
+                envs.push(("PATH", path_val));
+                envs.push((
+                    "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+                    "-C target-feature=+v -C target-cpu=spacemit-x100".to_string(),
+                ));
+                if is_cross {
+                    envs.push((
+                        "CARGO_BUILD_TARGET",
+                        "riscv64gc-unknown-linux-gnu".to_string(),
+                    ));
+                    envs.push((
+                        "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER",
+                        "clang".to_string(),
+                    ));
+                    envs.push(("CC_riscv64gc_unknown_linux_gnu", "clang".to_string()));
+                    envs.push(("CXX_riscv64gc_unknown_linux_gnu", "clang++".to_string()));
+                    envs.push((
+                        "CFLAGS_riscv64gc_unknown_linux_gnu",
+                        "--target=riscv64-unknown-linux-gnu --sysroot=/usr/riscv64-linux-gnu -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
+                    ));
+                    envs.push((
+                        "CXXFLAGS_riscv64gc_unknown_linux_gnu",
+                        "--target=riscv64-unknown-linux-gnu --sysroot=/usr/riscv64-linux-gnu -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
+                    ));
+                    info!(
+                        toolchain = "llvm-24",
+                        arch = %self.config.arch,
+                        "Injected cross-compile LLVM 24 environment targeting riscv64gc-unknown-linux-gnu (RVV 1.0 + spacemit-x100)"
+                    );
+                } else {
+                    envs.push(("CC", "clang".to_string()));
+                    envs.push(("CXX", "clang++".to_string()));
+                    envs.push((
+                        "RUSTFLAGS",
+                        "-C target-feature=+v -C target-cpu=spacemit-x100".to_string(),
+                    ));
+                    info!(
+                        toolchain = "llvm-24",
+                        "Injected native LLVM 24 environment with RVV 1.0 flags"
+                    );
+                }
             }
             Some("gcc-17") | Some("gcc-17-spacemit-x100") => {
-                let gcc_bin = if Path::new("/home/lma1980/opt/gcc-17-spacemit-x100/bin").exists() {
+                let gcc_bin = if Path::new("/opt/gcc-17-spacemit-x100/bin").exists() {
+                    "/opt/gcc-17-spacemit-x100/bin"
+                } else if Path::new("/home/lma1980/opt/gcc-17-spacemit-x100/bin").exists() {
                     "/home/lma1980/opt/gcc-17-spacemit-x100/bin"
                 } else if Path::new("/home/lma1980/opt/gcc-17/bin").exists() {
                     "/home/lma1980/opt/gcc-17/bin"
                 } else {
                     "/opt/cross-gcc-17/bin"
                 };
-                cmd.env("PATH", format!("{}:{}", gcc_bin, base_path));
-                cmd.env("CC", "riscv64-unknown-linux-gnu-gcc");
-                cmd.env("CXX", "riscv64-unknown-linux-gnu-g++");
-                cmd.env("CFLAGS", "-mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d");
-                cmd.env("CXXFLAGS", "-mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d");
+                envs.push(("PATH", format!("{}:{}", gcc_bin, base_path)));
+                envs.push((
+                    "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+                    "-C target-feature=+v -C target-cpu=spacemit-x100".to_string(),
+                ));
+                if is_cross {
+                    envs.push((
+                        "CARGO_BUILD_TARGET",
+                        "riscv64gc-unknown-linux-gnu".to_string(),
+                    ));
+                    envs.push((
+                        "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER",
+                        "riscv64-unknown-linux-gnu-gcc".to_string(),
+                    ));
+                    envs.push((
+                        "CC_riscv64gc_unknown_linux_gnu",
+                        "riscv64-unknown-linux-gnu-gcc".to_string(),
+                    ));
+                    envs.push((
+                        "CXX_riscv64gc_unknown_linux_gnu",
+                        "riscv64-unknown-linux-gnu-g++".to_string(),
+                    ));
+                    envs.push((
+                        "CFLAGS_riscv64gc_unknown_linux_gnu",
+                        "-mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
+                    ));
+                    envs.push((
+                        "CXXFLAGS_riscv64gc_unknown_linux_gnu",
+                        "-mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
+                    ));
+                } else {
+                    envs.push(("CC", "riscv64-unknown-linux-gnu-gcc".to_string()));
+                    envs.push(("CXX", "riscv64-unknown-linux-gnu-g++".to_string()));
+                    envs.push((
+                        "CFLAGS",
+                        "-mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
+                    ));
+                    envs.push((
+                        "CXXFLAGS",
+                        "-mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
+                    ));
+                }
                 info!(
                     toolchain = "gcc-17",
+                    arch = %self.config.arch,
                     "Injected GCC 17 environment with SpacemiT X100 flags"
                 );
             }
             _ => {}
+        }
+        envs
+    }
+
+    fn apply_toolchain_env(&self, cmd: &mut Command, task: &StageDispatchTask) {
+        let base_path =
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+        for (k, v) in self.compute_toolchain_env(task, &base_path) {
+            cmd.env(k, v);
         }
     }
 
@@ -1336,6 +1435,8 @@ impl StageRunner {
                 .arg("snapshot")
                 .arg(&repo_cache)
                 .arg(&stage_dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
                 .await;
 
@@ -1447,14 +1548,27 @@ impl StageRunner {
         }
 
         if self.config.use_btrfs {
-            let res = Command::new("btrfs")
+            let is_subvol = Command::new("btrfs")
                 .arg("subvolume")
-                .arg("delete")
+                .arg("show")
                 .arg(stage_dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
-                .await;
-            if res.is_ok() && !stage_dir.exists() {
-                return;
+                .await
+                .is_ok_and(|s| s.success());
+            if is_subvol {
+                let res = Command::new("btrfs")
+                    .arg("subvolume")
+                    .arg("delete")
+                    .arg(stage_dir)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+                if res.is_ok() && !stage_dir.exists() {
+                    return;
+                }
             }
         }
         let _ = tokio::fs::remove_dir_all(stage_dir).await;
@@ -1569,6 +1683,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_typed_tool_adapter_execution_subtask_24() {
         let dir = tempdir().unwrap();
         let config = WorkerConfig {
@@ -1648,6 +1763,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_reject_empty_typed_tasks_subtask_28() {
         let dir = tempdir().unwrap();
         let config = WorkerConfig {
@@ -1694,6 +1810,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_fail_closed_security_grant_denied_exit_handler_subtask_21() {
         let dir = tempdir().unwrap();
         let ceiling_path = dir.path().join("ceiling.yml");
@@ -1784,6 +1901,7 @@ allow_spacemit_ai_thread: false
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_run_stage_rejects_path_traversal() {
         let dir = tempdir().unwrap();
         let config = WorkerConfig {
@@ -1859,6 +1977,7 @@ allow_spacemit_ai_thread: false
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_stage_runner_w3c_traceparent_and_child_span_subtask_33() {
         let dir = tempdir().unwrap();
         let config = WorkerConfig {
@@ -1915,5 +2034,109 @@ allow_spacemit_ai_thread: false
         assert_eq!(span.node_id, "worker-riscv64");
         assert!(span.attributes_json.contains("\"cpu_cluster\":\"X100\""));
         assert!(span.attributes_json.contains("\"vlen_bits\":256"));
+    }
+
+    #[test]
+    fn test_cross_compile_factory_vs_native_toolchain_env() {
+        let dir = tempdir().unwrap();
+        let cross_cfg = WorkerConfig {
+            controller_url: "ws://127.0.0.1:8000/api/cluster/tunnel".into(),
+            cluster_token: "test".into(),
+            node_id: "node-b".into(),
+            arch: "x86_64".into(),
+            tags: vec![
+                "x86_64".into(),
+                "cross-compile".into(),
+                "riscv64".into(),
+                "build".into(),
+            ],
+            max_slots: 1,
+            workspace_dir: dir.path().to_path_buf(),
+            toolchains: vec![
+                "system".into(),
+                "llvm-24".into(),
+                "gcc-17-spacemit-x100".into(),
+            ],
+            use_btrfs: false,
+            isolation_mode: IsolationMode::None,
+        };
+        let cross_runner = StageRunner::new(cross_cfg);
+
+        let mut task = StageDispatchTask {
+            job_id: "job-cross-1".into(),
+            stage_id: "build-release".into(),
+            stage_name: "Build Release".into(),
+            repo_name: "LMA1980/k3-core".into(),
+            clone_url: "".into(),
+            commit_sha: "deadbeef".into(),
+            command: "".into(),
+            working_dir: None,
+            env_vars: vec![],
+            timeout_seconds: 10,
+            threads: 6,
+            toolchain: Some("llvm-24".into()),
+            exclusive: false,
+            max_concurrent_per_node: 1,
+            tasks: vec![],
+            sandbox_constraints: SandboxConstraintSpec::default(),
+            traceparent: None,
+        };
+
+        let cross_envs: std::collections::HashMap<&str, String> = cross_runner
+            .compute_toolchain_env(&task, "/usr/bin:/bin")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            cross_envs.get("CARGO_BUILD_TARGET").map(String::as_str),
+            Some("riscv64gc-unknown-linux-gnu")
+        );
+        assert_eq!(
+            cross_envs
+                .get("CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER")
+                .map(String::as_str),
+            Some("clang")
+        );
+        assert_eq!(
+            cross_envs
+                .get("CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS")
+                .map(String::as_str),
+            Some("-C target-feature=+v -C target-cpu=spacemit-x100")
+        );
+        // Host RUSTFLAGS must not be set on x86_64 cross-builds so host build.rs/proc-macros compile cleanly
+        assert!(!cross_envs.contains_key("RUSTFLAGS"));
+
+        // Verify native riscv64 worker behavior
+        let native_cfg = WorkerConfig {
+            node_id: "worker-riscv64".into(),
+            arch: "riscv64".into(),
+            ..cross_runner.config.clone()
+        };
+        let native_runner = StageRunner::new(native_cfg);
+        let native_envs: std::collections::HashMap<&str, String> = native_runner
+            .compute_toolchain_env(&task, "/usr/bin:/bin")
+            .into_iter()
+            .collect();
+        assert!(!native_envs.contains_key("CARGO_BUILD_TARGET"));
+        assert_eq!(
+            native_envs.get("RUSTFLAGS").map(String::as_str),
+            Some("-C target-feature=+v -C target-cpu=spacemit-x100")
+        );
+
+        // Verify gcc-17-spacemit-x100 cross-compile env
+        task.toolchain = Some("gcc-17-spacemit-x100".into());
+        let gcc_cross_envs: std::collections::HashMap<&str, String> = cross_runner
+            .compute_toolchain_env(&task, "/usr/bin:/bin")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            gcc_cross_envs.get("CARGO_BUILD_TARGET").map(String::as_str),
+            Some("riscv64gc-unknown-linux-gnu")
+        );
+        assert_eq!(
+            gcc_cross_envs
+                .get("CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER")
+                .map(String::as_str),
+            Some("riscv64-unknown-linux-gnu-gcc")
+        );
     }
 }

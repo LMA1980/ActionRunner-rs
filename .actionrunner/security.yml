@@ -1,0 +1,30 @@
+default_profile: "default_ci"
+
+profiles:
+  default_ci:
+    backend: Kernel
+    read_paths:
+      - /usr
+      - /bin
+      - /lib
+      - /etc/ssl
+      - /var/lib/action-runner/.rustup
+      - /var/lib/action-runner/.cargo
+      - /var/lib/action-runner/.local
+      - /var/lib/action-runner
+    write_paths:
+      - /var/lib/action-runner
+      - /tmp
+    exec_paths:
+      - /usr/bin
+      - /usr/local/bin
+      - /bin
+      - /var/lib/action-runner/.cargo/bin
+      - /var/lib/action-runner/.rustup
+      - /var/lib/action-runner/.local/bin
+    network_egress_cidrs: []
+    memlock_limit_kb: 65536
+    max_pids: 256
+    max_memory_mb: 12288
+    cpu_affinity_mask: 0x00FF
+    require_set_ai_thread: false
