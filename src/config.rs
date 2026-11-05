@@ -39,12 +39,16 @@ impl WorkerConfig {
             _ => "x86_64,fmt,clippy,audit,cross,heavy",
         };
 
-        let tags: Vec<String> = std::env::var("ACTION_RUNNER_TAGS")
+        let mut tags: Vec<String> = std::env::var("ACTION_RUNNER_TAGS")
             .unwrap_or_else(|_| default_tags.to_string())
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+
+        if Self::detect_sccache_bin().is_some() && !tags.iter().any(|t| t == "sccache") {
+            tags.push("sccache".to_string());
+        }
 
         let max_slots = std::env::var("ACTION_RUNNER_MAX_SLOTS")
             .ok()
@@ -57,18 +61,21 @@ impl WorkerConfig {
             .unwrap_or_else(|_| PathBuf::from("/var/lib/action-runner/workspace"));
 
         let mut toolchains = vec!["system".to_string()];
-        if Path::new("/opt/llvm-24-spacemit-x100").exists()
-            || Path::new("/home/lma1980/opt/llvm-24").exists()
-            || Path::new("/opt/cross-llvm-24").exists()
+        if Path::new("/opt/llvm-24-spacemit-x100/bin/clang").exists()
+            || Path::new("/home/lma1980/opt/llvm-24/bin/clang").exists()
+            || Path::new("/opt/cross-llvm-24/bin/clang").exists()
         {
             toolchains.push("llvm-24".to_string());
         }
-        if Path::new("/opt/gcc-17-spacemit-x100").exists()
-            || Path::new("/home/lma1980/opt/gcc-17-spacemit-x100").exists()
-            || Path::new("/opt/cross-gcc-17").exists()
+        if Path::new("/opt/gcc-17-spacemit-x100/bin/riscv64-unknown-linux-gnu-gcc").exists()
+            || Path::new("/opt/gcc-17-spacemit-x100/bin/gcc").exists()
+            || Path::new("/home/lma1980/opt/gcc-17-spacemit-x100/bin/riscv64-unknown-linux-gnu-gcc")
+                .exists()
+            || Path::new("/home/lma1980/opt/gcc-17-spacemit-x100/bin/gcc").exists()
+            || Path::new("/opt/cross-gcc-17/bin/riscv64-unknown-linux-gnu-gcc").exists()
         {
             toolchains.push("gcc-17-spacemit-x100".to_string());
-        } else if Path::new("/home/lma1980/opt/gcc-17").exists() {
+        } else if Path::new("/home/lma1980/opt/gcc-17/bin/gcc").exists() {
             toolchains.push("gcc-17".to_string());
         }
 
@@ -148,6 +155,91 @@ impl WorkerConfig {
             }
         }
         false
+    }
+
+    pub fn detect_sccache_bin() -> Option<PathBuf> {
+        if let Ok(val) = std::env::var("ACTION_RUNNER_SCCACHE_BIN") {
+            let trimmed = val.trim();
+            if trimmed.eq_ignore_ascii_case("false")
+                || trimmed.eq_ignore_ascii_case("off")
+                || trimmed.eq_ignore_ascii_case("none")
+                || trimmed == "0"
+            {
+                return None;
+            }
+            if !trimmed.is_empty() {
+                let p = PathBuf::from(trimmed);
+                if p.is_file() {
+                    return Some(p);
+                }
+                return None;
+            }
+        }
+
+        for candidate in ["/usr/local/bin/sccache", "/usr/bin/sccache"] {
+            let p = Path::new(candidate);
+            if p.is_file() {
+                return Some(p.to_path_buf());
+            }
+        }
+
+        if let Ok(home) = std::env::var("CARGO_HOME") {
+            let p = Path::new(&home).join("bin/sccache");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let p = Path::new(&home).join(".cargo/bin/sccache");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    pub fn load_sccache_env() -> Vec<(String, String)> {
+        let mut envs = Vec::new();
+        let env_file = std::env::var("ACTION_RUNNER_SCCACHE_ENV_FILE")
+            .unwrap_or_else(|_| "/etc/action-runner/sccache.env".to_string());
+        if let Ok(content) = std::fs::read_to_string(&env_file) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = trimmed.split_once('=') {
+                    let key = k.trim().trim_start_matches("export ").trim().to_string();
+                    let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                    if !key.is_empty() {
+                        envs.push((key, val));
+                    }
+                }
+            }
+        }
+        for key in [
+            "SCCACHE_BUCKET",
+            "SCCACHE_REGION",
+            "SCCACHE_ENDPOINT",
+            "SCCACHE_S3_USE_SSL",
+            "SCCACHE_S3_KEY_PREFIX",
+            "SCCACHE_DIR",
+            "SCCACHE_CACHE_SIZE",
+            "SCCACHE_SERVER_PORT",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+        ] {
+            if let Ok(val) = std::env::var(key) {
+                if !val.trim().is_empty() {
+                    if let Some(pos) = envs.iter().position(|(k, _)| k == key) {
+                        envs[pos].1 = val;
+                    } else {
+                        envs.push((key.to_string(), val));
+                    }
+                }
+            }
+        }
+        envs
     }
 
     pub fn resolve_secret(env_var: &str) -> Option<String> {

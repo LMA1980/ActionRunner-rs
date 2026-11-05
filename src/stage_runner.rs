@@ -1,4 +1,7 @@
-use action_runner_ipc::{encode_log_batch, LogEntry, SecurityGrantDenied, StageDispatchTask};
+use action_runner_ipc::{
+    encode_log_batch, LogEntry, SccacheMode, SecurityGrantDenied, StageDispatchTask,
+    TypedTaskInvocation,
+};
 use chrono::Utc;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -10,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::{is_safe_repo_name, WorkerConfig};
 use crate::sandbox::WorkerSandboxRunner;
@@ -901,6 +904,38 @@ impl StageRunner {
                 cmd.env(k, v);
             }
 
+            if let Err(sccache_err) = self.apply_sccache_env(&mut cmd, task, inv) {
+                error!(
+                    job_id = %task.job_id,
+                    stage_id = %task.stage_id,
+                    task_id = %inv.task_id,
+                    "{}", sccache_err
+                );
+                self.cleanup_stage_workspace(stage_dir).await;
+                let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
+                let res = StageExecutionResult::failed_early(
+                    &trace_session,
+                    126,
+                    duration_secs,
+                    0,
+                    sccache_err,
+                    None,
+                );
+                let otel_logs = trace_session.correlate_logs(&all_stage_logs);
+                if let Some(span) = &res.child_span {
+                    let _ = self
+                        .telemetry_emitter
+                        .emit_stage_bundle(
+                            std::slice::from_ref(span),
+                            &otel_logs,
+                            &all_test_runs,
+                            &all_bench_runs,
+                        )
+                        .await;
+                }
+                return res;
+            }
+
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
 
@@ -1271,11 +1306,11 @@ impl StageRunner {
                     format!("{}:{}", llvm_bin, base_path)
                 };
                 envs.push(("PATH", path_val));
-                envs.push((
-                    "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS",
-                    "-C target-feature=+v -C target-cpu=spacemit-x100".to_string(),
-                ));
                 if is_cross {
+                    envs.push((
+                        "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+                        "-C target-feature=+v -C target-cpu=spacemit-x100 -C link-arg=--target=riscv64-linux-gnu -C link-arg=--sysroot=/ -C link-arg=-fuse-ld=lld".to_string(),
+                    ));
                     envs.push((
                         "CARGO_BUILD_TARGET",
                         "riscv64gc-unknown-linux-gnu".to_string(),
@@ -1288,11 +1323,11 @@ impl StageRunner {
                     envs.push(("CXX_riscv64gc_unknown_linux_gnu", "clang++".to_string()));
                     envs.push((
                         "CFLAGS_riscv64gc_unknown_linux_gnu",
-                        "--target=riscv64-unknown-linux-gnu --sysroot=/usr/riscv64-linux-gnu -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
+                        "--target=riscv64-linux-gnu --sysroot=/ -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
                     ));
                     envs.push((
                         "CXXFLAGS_riscv64gc_unknown_linux_gnu",
-                        "--target=riscv64-unknown-linux-gnu --sysroot=/usr/riscv64-linux-gnu -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
+                        "--target=riscv64-linux-gnu --sysroot=/ -mcpu=spacemit-x100 -march=rv64gcv -mabi=lp64d".to_string(),
                     ));
                     info!(
                         toolchain = "llvm-24",
@@ -1300,6 +1335,10 @@ impl StageRunner {
                         "Injected cross-compile LLVM 24 environment targeting riscv64gc-unknown-linux-gnu (RVV 1.0 + spacemit-x100)"
                     );
                 } else {
+                    envs.push((
+                        "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+                        "-C target-feature=+v -C target-cpu=spacemit-x100".to_string(),
+                    ));
                     envs.push(("CC", "clang".to_string()));
                     envs.push(("CXX", "clang++".to_string()));
                     envs.push((
@@ -1381,6 +1420,154 @@ impl StageRunner {
         for (k, v) in self.compute_toolchain_env(task, &base_path) {
             cmd.env(k, v);
         }
+    }
+
+    pub fn is_sccache_eligible_tool(tool_name: &str) -> bool {
+        matches!(
+            tool_name.trim(),
+            "cargo-build" | "cargo-test" | "cargo-clippy" | "cargo-bench" | "trunk"
+        )
+    }
+
+    pub fn resolve_effective_sccache_mode(
+        task: &StageDispatchTask,
+        inv: &TypedTaskInvocation,
+    ) -> SccacheMode {
+        if task.sccache_mode == SccacheMode::Off || inv.sccache_mode == SccacheMode::Off {
+            if inv.sccache_mode == SccacheMode::Mandatory {
+                return SccacheMode::Mandatory;
+            }
+            if task.sccache_mode == SccacheMode::Off && inv.sccache_mode == SccacheMode::Off {
+                return SccacheMode::Off;
+            }
+            return inv.sccache_mode;
+        }
+        if inv.sccache_mode == SccacheMode::Mandatory || task.sccache_mode == SccacheMode::Mandatory
+        {
+            return SccacheMode::Mandatory;
+        }
+        inv.sccache_mode
+    }
+
+    pub fn compute_sccache_env(
+        &self,
+        task: &StageDispatchTask,
+        inv: &TypedTaskInvocation,
+        sccache_bin: Option<&Path>,
+        sccache_extra_env: &[(String, String)],
+    ) -> Result<Vec<(String, String)>, String> {
+        let mode = Self::resolve_effective_sccache_mode(task, inv);
+        match mode {
+            SccacheMode::Off => Ok(Vec::new()),
+            SccacheMode::Try => {
+                if !Self::is_sccache_eligible_tool(&inv.tool_name) {
+                    return Ok(Vec::new());
+                }
+                if let Some(bin) = sccache_bin {
+                    let mut envs = vec![
+                        ("RUSTC_WRAPPER".to_string(), bin.display().to_string()),
+                        ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
+                    ];
+                    envs.extend(sccache_extra_env.iter().cloned());
+                    Ok(envs)
+                } else {
+                    warn!(
+                        job_id = %task.job_id,
+                        stage_id = %task.stage_id,
+                        task_id = %inv.task_id,
+                        "sccache mode is 'try' but sccache binary is not available on host; proceeding without sccache"
+                    );
+                    Ok(Vec::new())
+                }
+            }
+            SccacheMode::Mandatory => {
+                let Some(bin) = sccache_bin else {
+                    return Err(format!(
+                        "Stage '{}' (task '{}') requires sccache: mandatory, but sccache binary is not installed or available on worker '{}'",
+                        task.stage_id, inv.task_id, self.config.node_id
+                    ));
+                };
+                if !Self::is_sccache_eligible_tool(&inv.tool_name) {
+                    return Ok(Vec::new());
+                }
+                let mut envs = vec![
+                    ("RUSTC_WRAPPER".to_string(), bin.display().to_string()),
+                    ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
+                ];
+                envs.extend(sccache_extra_env.iter().cloned());
+                Ok(envs)
+            }
+        }
+    }
+
+    fn apply_sccache_env(
+        &self,
+        cmd: &mut Command,
+        task: &StageDispatchTask,
+        inv: &TypedTaskInvocation,
+    ) -> Result<(), String> {
+        let mode = Self::resolve_effective_sccache_mode(task, inv);
+        if mode == SccacheMode::Off {
+            cmd.env_remove("RUSTC_WRAPPER");
+            cmd.env_remove("CARGO_BUILD_RUSTC_WRAPPER");
+            return Ok(());
+        }
+
+        let sccache_bin = WorkerConfig::detect_sccache_bin();
+        let sccache_extra_env = WorkerConfig::load_sccache_env();
+
+        if mode == SccacheMode::Mandatory {
+            if let Some(ref bin) = sccache_bin {
+                let mut check_cmd = std::process::Command::new(bin);
+                check_cmd.arg("--show-stats");
+                for (k, v) in &sccache_extra_env {
+                    check_cmd.env(k, v);
+                }
+                match check_cmd.output() {
+                    Ok(out) if out.status.success() => {}
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        return Err(format!(
+                            "Stage '{}' (task '{}') requires sccache: mandatory, but sccache health check failed (exit {:?}): {}",
+                            task.stage_id,
+                            inv.task_id,
+                            out.status.code(),
+                            stderr.trim()
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "Stage '{}' (task '{}') requires sccache: mandatory, but failed to execute '{} --show-stats': {}",
+                            task.stage_id,
+                            inv.task_id,
+                            bin.display(),
+                            e
+                        ));
+                    }
+                }
+            }
+        }
+
+        let envs =
+            self.compute_sccache_env(task, inv, sccache_bin.as_deref(), &sccache_extra_env)?;
+        if envs.is_empty() {
+            cmd.env_remove("RUSTC_WRAPPER");
+            cmd.env_remove("CARGO_BUILD_RUSTC_WRAPPER");
+        } else {
+            if let Some(ref bin) = sccache_bin {
+                // Best-effort pre-warm local sccache server with S3 credentials
+                let mut start_cmd = std::process::Command::new(bin);
+                start_cmd.arg("--start-server");
+                for (k, v) in &sccache_extra_env {
+                    start_cmd.env(k, v);
+                }
+                let _ = start_cmd.output();
+            }
+            for (k, v) in envs {
+                cmd.env(k, v);
+            }
+        }
+        Ok(())
     }
 
     async fn prepare_stage_workspace(
@@ -1749,9 +1936,11 @@ mod tests {
                 working_dir: None,
                 env_vars: vec![],
                 sandbox: SandboxConstraintSpec::default(),
+                sccache_mode: Default::default(),
             }],
             sandbox_constraints: SandboxConstraintSpec::default(),
             traceparent: None,
+            sccache_mode: Default::default(),
         };
 
         let res = runner.run_stage(&task, tx, None).await;
@@ -1799,6 +1988,7 @@ mod tests {
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
             traceparent: None,
+            sccache_mode: Default::default(),
         };
 
         let res = runner.run_stage(&task, tx, None).await;
@@ -1883,9 +2073,11 @@ allow_spacemit_ai_thread: false
                 working_dir: None,
                 env_vars: vec![],
                 sandbox: SandboxConstraintSpec::default(),
+                sccache_mode: Default::default(),
             }],
             sandbox_constraints: excessive_constraints,
             traceparent: None,
+            sccache_mode: Default::default(),
         };
 
         let res = runner.run_stage(&task, tx, None).await;
@@ -1938,6 +2130,7 @@ allow_spacemit_ai_thread: false
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
             traceparent: None,
+            sccache_mode: Default::default(),
         };
         let res = runner.run_stage(&bad_repo_task, tx.clone(), None).await;
         assert_eq!(res.exit_code, -1);
@@ -1965,6 +2158,7 @@ allow_spacemit_ai_thread: false
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
             traceparent: None,
+            sccache_mode: Default::default(),
         };
         let res2 = runner
             .run_stage(&bad_working_dir_task, tx.clone(), None)
@@ -2018,9 +2212,11 @@ allow_spacemit_ai_thread: false
                 working_dir: None,
                 env_vars: vec![],
                 sandbox: SandboxConstraintSpec::default(),
+                sccache_mode: Default::default(),
             }],
             sandbox_constraints: SandboxConstraintSpec::default(),
             traceparent: Some(parent_tp.to_string()),
+            sccache_mode: Default::default(),
         };
 
         let res = runner.run_stage(&task, tx, None).await;
@@ -2080,6 +2276,7 @@ allow_spacemit_ai_thread: false
             tasks: vec![],
             sandbox_constraints: SandboxConstraintSpec::default(),
             traceparent: None,
+            sccache_mode: Default::default(),
         };
 
         let cross_envs: std::collections::HashMap<&str, String> = cross_runner
@@ -2100,7 +2297,7 @@ allow_spacemit_ai_thread: false
             cross_envs
                 .get("CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS")
                 .map(String::as_str),
-            Some("-C target-feature=+v -C target-cpu=spacemit-x100")
+            Some("-C target-feature=+v -C target-cpu=spacemit-x100 -C link-arg=--target=riscv64-linux-gnu -C link-arg=--sysroot=/ -C link-arg=-fuse-ld=lld")
         );
         // Host RUSTFLAGS must not be set on x86_64 cross-builds so host build.rs/proc-macros compile cleanly
         assert!(!cross_envs.contains_key("RUSTFLAGS"));
@@ -2138,5 +2335,105 @@ allow_spacemit_ai_thread: false
                 .map(String::as_str),
             Some("riscv64-unknown-linux-gnu-gcc")
         );
+    }
+
+    #[test]
+    fn test_compute_sccache_env_modes_and_tool_exclusions() {
+        let dir = tempdir().unwrap();
+        let cfg = WorkerConfig {
+            controller_url: "ws://127.0.0.1:8000/api/cluster/tunnel".into(),
+            cluster_token: "test".into(),
+            node_id: "node-a".into(),
+            arch: "x86_64".into(),
+            tags: vec!["x86_64".into(), "sccache".into()],
+            max_slots: 1,
+            workspace_dir: dir.path().to_path_buf(),
+            toolchains: vec!["system".into()],
+            use_btrfs: false,
+            isolation_mode: IsolationMode::None,
+        };
+        let runner = StageRunner::new(cfg);
+        let sccache_path = Path::new("/usr/local/bin/sccache");
+        let extra = vec![
+            ("SCCACHE_BUCKET".to_string(), "sccache".to_string()),
+            (
+                "SCCACHE_ENDPOINT".to_string(),
+                "http://127.0.0.1:3900".to_string(),
+            ),
+        ];
+
+        // 1. SccacheMode::Try with eligible tool (cargo-clippy) and sccache present -> injects RUSTC_WRAPPER + CARGO_INCREMENTAL=0
+        let task_try = StageDispatchTask {
+            job_id: "j1".into(),
+            stage_id: "s1".into(),
+            sccache_mode: SccacheMode::Try,
+            ..Default::default()
+        };
+        let inv_clippy = TypedTaskInvocation {
+            task_id: "t-clippy".into(),
+            tool_name: "cargo-clippy".into(),
+            sccache_mode: SccacheMode::Try,
+            ..Default::default()
+        };
+        let envs = runner
+            .compute_sccache_env(&task_try, &inv_clippy, Some(sccache_path), &extra)
+            .expect("try with binary should succeed");
+        let map: std::collections::HashMap<String, String> = envs.into_iter().collect();
+        assert_eq!(
+            map.get("RUSTC_WRAPPER").map(String::as_str),
+            Some("/usr/local/bin/sccache")
+        );
+        assert_eq!(map.get("CARGO_INCREMENTAL").map(String::as_str), Some("0"));
+        assert_eq!(
+            map.get("SCCACHE_BUCKET").map(String::as_str),
+            Some("sccache")
+        );
+
+        // 2. SccacheMode::Try when sccache binary is missing -> falls back gracefully (Ok(empty))
+        let envs_missing = runner
+            .compute_sccache_env(&task_try, &inv_clippy, None, &extra)
+            .expect("try without binary must not fail");
+        assert!(envs_missing.is_empty());
+
+        // 3. SccacheMode::Mandatory when sccache binary is missing -> fails closed with Err
+        let inv_mandatory = TypedTaskInvocation {
+            task_id: "t-build".into(),
+            tool_name: "cargo-build".into(),
+            sccache_mode: SccacheMode::Mandatory,
+            ..Default::default()
+        };
+        let err = runner
+            .compute_sccache_env(&task_try, &inv_mandatory, None, &extra)
+            .expect_err("mandatory without binary must fail closed");
+        assert!(err.contains("requires sccache: mandatory"));
+
+        // 4. SccacheMode::Off -> returns empty even when binary is present
+        let inv_off = TypedTaskInvocation {
+            task_id: "t-off".into(),
+            tool_name: "cargo-build".into(),
+            sccache_mode: SccacheMode::Off,
+            ..Default::default()
+        };
+        let envs_off = runner
+            .compute_sccache_env(&task_try, &inv_off, Some(sccache_path), &extra)
+            .expect("off mode should succeed");
+        assert!(envs_off.is_empty());
+
+        // 5. Excluded tools (cargo-miri, cargo-llvm-cov, cargo-fmt) do not get RUSTC_WRAPPER clobbered
+        for excluded in ["cargo-miri", "cargo-llvm-cov", "cargo-fmt", "cargo-audit"] {
+            let inv_excl = TypedTaskInvocation {
+                task_id: "t-excl".into(),
+                tool_name: excluded.into(),
+                sccache_mode: SccacheMode::Try,
+                ..Default::default()
+            };
+            let envs_excl = runner
+                .compute_sccache_env(&task_try, &inv_excl, Some(sccache_path), &extra)
+                .expect("excluded tool should succeed");
+            assert!(
+                envs_excl.is_empty(),
+                "Tool {excluded} must not inject RUSTC_WRAPPER"
+            );
+        }
     }
 }

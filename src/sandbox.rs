@@ -337,6 +337,7 @@ pub mod tests {
             tasks: Vec::new(),
             sandbox_constraints: spec,
             traceparent: None,
+            sccache_mode: Default::default(),
         }
     }
 

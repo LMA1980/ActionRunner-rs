@@ -58,9 +58,11 @@ async fn test_stage_runner_execution_and_log_batching() {
             working_dir: None,
             env_vars: vec![],
             sandbox: SandboxConstraintSpec::default(),
+            sccache_mode: Default::default(),
         }],
         sandbox_constraints: SandboxConstraintSpec::default(),
         traceparent: None,
+        sccache_mode: Default::default(),
     };
 
     let (started_tx, started_rx) = tokio::sync::oneshot::channel::<u32>();
@@ -255,6 +257,7 @@ async fn test_path_traversal_rejection_absolute_working_dir() {
         tasks: vec![],
         sandbox_constraints: SandboxConstraintSpec::default(),
         traceparent: None,
+        sccache_mode: Default::default(),
     };
 
     let res = runner.run_stage(&task, log_tx, None).await;
@@ -303,6 +306,7 @@ async fn test_path_traversal_rejection_parent_dir() {
         tasks: vec![],
         sandbox_constraints: SandboxConstraintSpec::default(),
         traceparent: None,
+        sccache_mode: Default::default(),
     };
 
     let res = runner.run_stage(&task, log_tx, None).await;
@@ -352,6 +356,7 @@ async fn test_path_traversal_rejection_malicious_repo_and_ids() {
         tasks: vec![],
         sandbox_constraints: SandboxConstraintSpec::default(),
         traceparent: None,
+        sccache_mode: Default::default(),
     };
     let res1 = runner.run_stage(&bad_repo_task, log_tx.clone(), None).await;
     assert_eq!(res1.exit_code, -1);
@@ -379,6 +384,7 @@ async fn test_path_traversal_rejection_malicious_repo_and_ids() {
         tasks: vec![],
         sandbox_constraints: SandboxConstraintSpec::default(),
         traceparent: None,
+        sccache_mode: Default::default(),
     };
     let res2 = runner.run_stage(&bad_job_task, log_tx.clone(), None).await;
     assert_eq!(res2.exit_code, -1);
@@ -403,6 +409,7 @@ async fn test_path_traversal_rejection_malicious_repo_and_ids() {
         tasks: vec![],
         sandbox_constraints: SandboxConstraintSpec::default(),
         traceparent: None,
+        sccache_mode: Default::default(),
     };
     let res3 = runner.run_stage(&bad_stage_task, log_tx, None).await;
     assert_eq!(res3.exit_code, -1);
@@ -497,9 +504,11 @@ async fn test_stage_runner_streams_spans_and_correlated_logs_to_muobserve_collec
             working_dir: None,
             env_vars: vec![],
             sandbox: SandboxConstraintSpec::default(),
+            sccache_mode: Default::default(),
         }],
         sandbox_constraints: SandboxConstraintSpec::default(),
         traceparent: Some(parent_tp.to_string()),
+        sccache_mode: Default::default(),
     };
 
     let res = runner.run_stage(&task, log_tx, None).await;

@@ -234,12 +234,21 @@ impl WorkerAgent {
 
         let hb_handle = tokio::spawn(async move {
             let mut hb_seq = 1000u64;
+            let num_cpus = std::thread::available_parallelism()
+                .map(|n| n.get() as f32)
+                .unwrap_or(4.0)
+                .max(1.0);
             loop {
                 sleep(Duration::from_secs(5)).await;
+                let cpu_load_pct = std::fs::read_to_string("/proc/loadavg")
+                    .ok()
+                    .and_then(|s| s.split_whitespace().next()?.parse::<f32>().ok())
+                    .map(|load1| ((load1 / num_cpus) * 100.0).clamp(0.0, 100.0))
+                    .unwrap_or(10.0);
                 let hb = WorkerHeartbeat {
                     node_id: node_id.clone(),
                     active_slots: active_slots.load(Ordering::Relaxed),
-                    cpu_load_pct: 10.0,
+                    cpu_load_pct,
                     ram_used_mb: 1024,
                     timestamp_epoch_ms: Utc::now().timestamp_millis() as u64,
                 };
@@ -260,7 +269,11 @@ impl WorkerAgent {
         });
 
         let stage_runner = Arc::new(StageRunner::new(self.config.clone()));
-        let liveness_timeout = Duration::from_secs(15);
+        let liveness_timeout = std::env::var("ACTION_RUNNER_LIVENESS_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(120));
         let mut liveness_deadline = tokio::time::Instant::now() + liveness_timeout;
 
         loop {
