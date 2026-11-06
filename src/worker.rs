@@ -158,13 +158,25 @@ impl WorkerAgent {
                                 info!("Worker shutting down; exiting");
                                 break;
                             }
+                            let nanos = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.subsec_nanos() as u64)
+                                .unwrap_or(12345);
+                            let mut state = nanos ^ 0x5deece66d;
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            let factor = 0.8 + 0.4 * ((state % 10_000) as f64 / 10_000.0);
+                            let retry_duration =
+                                Duration::from_secs_f64(backoff.as_secs_f64() * factor);
+
                             warn!(
                                 error = %e,
-                                retry_in = ?backoff,
+                                retry_in = ?retry_duration,
                                 "Cluster connection error; backing off before retry"
                             );
                             tokio::select! {
-                                _ = sleep(backoff) => {}
+                                _ = sleep(retry_duration) => {}
                                 _ = shutdown_rx.changed() => {
                                     info!("Shutdown signaled during retry backoff; exiting");
                                     break;
@@ -221,7 +233,23 @@ impl WorkerAgent {
         let mut reg_frame = Vec::with_capacity(action_runner_ipc::HEADER_SIZE + reg_payload.len());
         reg_frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&reg_hdr));
         reg_frame.extend_from_slice(&reg_payload);
-        ws_sender.send(Message::Binary(reg_frame.into())).await?;
+        let write_timeout = std::env::var("ACTION_RUNNER_WRITE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(10));
+
+        tokio::time::timeout(
+            write_timeout,
+            ws_sender.send(Message::Binary(reg_frame.into())),
+        )
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Timed out sending WorkerRegistration frame to coordinator",
+            )
+        })??;
         info!("Registered with coordinator as '{}'", self.config.node_id);
 
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(128);
@@ -232,6 +260,12 @@ impl WorkerAgent {
         let hb_tx = outbound_tx.clone();
         let hb_fory = create_fory_runtime()?;
 
+        let ping_interval = std::env::var("ACTION_RUNNER_PING_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(5));
+
         let hb_handle = tokio::spawn(async move {
             let mut hb_seq = 1000u64;
             let num_cpus = std::thread::available_parallelism()
@@ -239,7 +273,7 @@ impl WorkerAgent {
                 .unwrap_or(4.0)
                 .max(1.0);
             loop {
-                sleep(Duration::from_secs(5)).await;
+                sleep(ping_interval).await;
                 let cpu_load_pct = std::fs::read_to_string("/proc/loadavg")
                     .ok()
                     .and_then(|s| s.split_whitespace().next()?.parse::<f32>().ok())
@@ -273,7 +307,7 @@ impl WorkerAgent {
             .ok()
             .and_then(|s| s.parse().ok())
             .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(120));
+            .unwrap_or(Duration::from_secs(15));
         let mut liveness_deadline = tokio::time::Instant::now() + liveness_timeout;
 
         loop {
@@ -284,7 +318,11 @@ impl WorkerAgent {
                         timeout_secs = liveness_timeout.as_secs(),
                         "Coordinator tunnel read-liveness deadline expired without Pong or inbound frame; disconnecting to trigger reconnect"
                     );
-                    break;
+                    hb_handle.abort();
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Coordinator tunnel read-liveness deadline expired without Pong or inbound frame",
+                    )));
                 }
 
                 _ = shutdown_watch.changed() => {
@@ -315,8 +353,16 @@ impl WorkerAgent {
                             let mut frame = Vec::with_capacity(action_runner_ipc::HEADER_SIZE + payload.len());
                             frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
                             frame.extend_from_slice(&payload);
-                            let _ = ws_sender.send(Message::Binary(frame.into())).await;
-                            let _ = ws_sender.flush().await;
+                            let _ = tokio::time::timeout(
+                                write_timeout,
+                                ws_sender.send(Message::Binary(frame.into())),
+                            )
+                            .await;
+                            let _ = tokio::time::timeout(
+                                write_timeout,
+                                ws_sender.flush(),
+                            )
+                            .await;
                             info!(node = %self.config.node_id, stages = ?interrupted, "Dispatched WorkerShutdown frame to coordinator");
                         }
                         break;
@@ -329,7 +375,7 @@ impl WorkerAgent {
                         .map(|(hdr, _)| hdr.msg_type == MSG_TYPE_WORKER_HEARTBEAT)
                         .unwrap_or(false);
                     tokio::time::timeout(
-                        Duration::from_secs(10),
+                        write_timeout,
                         ws_sender.send(Message::Binary(frame.into())),
                     )
                     .await
@@ -340,9 +386,11 @@ impl WorkerAgent {
                         )
                     })??;
                     if is_hb {
+                        let ping_payload: tokio_tungstenite::tungstenite::Bytes =
+                            Utc::now().timestamp_millis().to_be_bytes().to_vec().into();
                         tokio::time::timeout(
-                            Duration::from_secs(10),
-                            ws_sender.send(Message::Ping(Vec::new().into())),
+                            write_timeout,
+                            ws_sender.send(Message::Ping(ping_payload)),
                         )
                         .await
                         .map_err(|_| {
@@ -365,7 +413,7 @@ impl WorkerAgent {
                     match &msg {
                         Message::Ping(payload) => {
                             let _ = tokio::time::timeout(
-                                Duration::from_secs(10),
+                                write_timeout,
                                 ws_sender.send(Message::Pong(payload.clone())),
                             )
                             .await;
