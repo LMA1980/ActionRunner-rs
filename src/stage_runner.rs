@@ -1425,7 +1425,7 @@ impl StageRunner {
     pub fn is_sccache_eligible_tool(tool_name: &str) -> bool {
         matches!(
             tool_name.trim(),
-            "cargo-build" | "cargo-test" | "cargo-clippy" | "cargo-bench" | "trunk"
+            "cargo-build" | "cargo-check" | "cargo-test" | "cargo-clippy" | "cargo-bench" | "trunk"
         )
     }
 
@@ -1433,18 +1433,15 @@ impl StageRunner {
         task: &StageDispatchTask,
         inv: &TypedTaskInvocation,
     ) -> SccacheMode {
-        if task.sccache_mode == SccacheMode::Off || inv.sccache_mode == SccacheMode::Off {
-            if inv.sccache_mode == SccacheMode::Mandatory {
-                return SccacheMode::Mandatory;
-            }
-            if task.sccache_mode == SccacheMode::Off && inv.sccache_mode == SccacheMode::Off {
-                return SccacheMode::Off;
-            }
+        if inv.sccache_mode != SccacheMode::Try {
             return inv.sccache_mode;
         }
-        if inv.sccache_mode == SccacheMode::Mandatory || task.sccache_mode == SccacheMode::Mandatory
-        {
-            return SccacheMode::Mandatory;
+        let no_per_task_overrides = task
+            .tasks
+            .iter()
+            .all(|t| t.sccache_mode == SccacheMode::Try);
+        if no_per_task_overrides && task.sccache_mode != SccacheMode::Try {
+            return task.sccache_mode;
         }
         inv.sccache_mode
     }
@@ -1457,6 +1454,21 @@ impl StageRunner {
         sccache_extra_env: &[(String, String)],
     ) -> Result<Vec<(String, String)>, String> {
         let mode = Self::resolve_effective_sccache_mode(task, inv);
+        let build_wrapper_envs = |bin: &Path| -> Vec<(String, String)> {
+            let mut envs = vec![
+                ("RUSTC_WRAPPER".to_string(), bin.display().to_string()),
+                ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
+            ];
+            if !sccache_extra_env
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("SCCACHE_IDLE_TIMEOUT"))
+            {
+                envs.push(("SCCACHE_IDLE_TIMEOUT".to_string(), "0".to_string()));
+            }
+            envs.extend(sccache_extra_env.iter().cloned());
+            envs
+        };
+
         match mode {
             SccacheMode::Off => Ok(Vec::new()),
             SccacheMode::Try => {
@@ -1464,12 +1476,7 @@ impl StageRunner {
                     return Ok(Vec::new());
                 }
                 if let Some(bin) = sccache_bin {
-                    let mut envs = vec![
-                        ("RUSTC_WRAPPER".to_string(), bin.display().to_string()),
-                        ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
-                    ];
-                    envs.extend(sccache_extra_env.iter().cloned());
-                    Ok(envs)
+                    Ok(build_wrapper_envs(bin))
                 } else {
                     warn!(
                         job_id = %task.job_id,
@@ -1490,13 +1497,142 @@ impl StageRunner {
                 if !Self::is_sccache_eligible_tool(&inv.tool_name) {
                     return Ok(Vec::new());
                 }
-                let mut envs = vec![
-                    ("RUSTC_WRAPPER".to_string(), bin.display().to_string()),
-                    ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
-                ];
-                envs.extend(sccache_extra_env.iter().cloned());
-                Ok(envs)
+                Ok(build_wrapper_envs(bin))
             }
+        }
+    }
+
+    fn run_sccache_control_cmd(
+        bin: &Path,
+        arg: &str,
+        sccache_extra_env: &[(String, String)],
+        timeout: std::time::Duration,
+    ) -> Result<std::process::Output, String> {
+        let mut cmd = std::process::Command::new(bin);
+        cmd.arg(arg)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if !sccache_extra_env
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("SCCACHE_IDLE_TIMEOUT"))
+        {
+            cmd.env("SCCACHE_IDLE_TIMEOUT", "0");
+        }
+        for (k, v) in sccache_extra_env {
+            cmd.env(k, v);
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to execute '{} {}': {}", bin.display(), arg, e))?;
+
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    return child.wait_with_output().map_err(|e| {
+                        format!(
+                            "failed to collect output from '{} {}': {}",
+                            bin.display(),
+                            arg,
+                            e
+                        )
+                    });
+                }
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(format!(
+                            "timed out after {}s waiting for '{} {}'",
+                            timeout.as_secs(),
+                            bin.display(),
+                            arg
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "error waiting for '{} {}': {}",
+                        bin.display(),
+                        arg,
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
+    pub fn ensure_sccache_server_healthy(
+        bin: &Path,
+        sccache_extra_env: &[(String, String)],
+    ) -> Result<(), String> {
+        Self::ensure_sccache_server_healthy_with(sccache_extra_env, |arg, timeout| {
+            let out = Self::run_sccache_control_cmd(bin, arg, sccache_extra_env, timeout)?;
+            Ok((
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            ))
+        })
+    }
+
+    pub fn ensure_sccache_server_healthy_with<F>(
+        sccache_extra_env: &[(String, String)],
+        mut run_control: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&str, std::time::Duration) -> Result<(Option<i32>, String, String), String>,
+    {
+        let timeout = std::time::Duration::from_secs(5);
+        let expects_s3_bucket = sccache_extra_env
+            .iter()
+            .any(|(k, v)| k == "SCCACHE_BUCKET" && !v.trim().is_empty())
+            || std::env::var("SCCACHE_BUCKET")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+
+        let first = run_control("--show-stats", timeout);
+        match first {
+            Ok((Some(0), stdout, _)) => {
+                if expects_s3_bucket && stdout.contains("Local disk") {
+                    warn!(
+                        "sccache server was running in Local disk mode despite SCCACHE_BUCKET configuration; restarting server with S3 environment"
+                    );
+                    let _ = run_control("--stop-server", std::time::Duration::from_secs(3));
+                    let (code, _, stderr) = run_control("--show-stats", timeout)?;
+                    if code != Some(0) {
+                        return Err(format!(
+                            "sccache S3 server restart failed (exit {:?}): {}",
+                            code,
+                            stderr.trim()
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            Ok(_) => {
+                let _ = run_control("--stop-server", std::time::Duration::from_secs(3));
+                let (code, stdout, stderr) = run_control("--show-stats", timeout)?;
+                if code == Some(0) {
+                    Ok(())
+                } else {
+                    let detail = if stderr.trim().is_empty() {
+                        stdout.trim().to_string()
+                    } else {
+                        stderr.trim().to_string()
+                    };
+                    Err(format!(
+                        "sccache health check failed (exit {:?}): {}",
+                        code, detail
+                    ))
+                }
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -1516,56 +1652,37 @@ impl StageRunner {
         let sccache_bin = WorkerConfig::detect_sccache_bin();
         let sccache_extra_env = WorkerConfig::load_sccache_env();
 
-        if mode == SccacheMode::Mandatory {
-            if let Some(ref bin) = sccache_bin {
-                let mut check_cmd = std::process::Command::new(bin);
-                check_cmd.arg("--show-stats");
-                for (k, v) in &sccache_extra_env {
-                    check_cmd.env(k, v);
-                }
-                match check_cmd.output() {
-                    Ok(out) if out.status.success() => {}
-                    Ok(out) => {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        return Err(format!(
-                            "Stage '{}' (task '{}') requires sccache: mandatory, but sccache health check failed (exit {:?}): {}",
-                            task.stage_id,
-                            inv.task_id,
-                            out.status.code(),
-                            stderr.trim()
-                        ));
-                    }
-                    Err(e) => {
-                        return Err(format!(
-                            "Stage '{}' (task '{}') requires sccache: mandatory, but failed to execute '{} --show-stats': {}",
-                            task.stage_id,
-                            inv.task_id,
-                            bin.display(),
-                            e
-                        ));
-                    }
-                }
-            }
-        }
-
         let envs =
             self.compute_sccache_env(task, inv, sccache_bin.as_deref(), &sccache_extra_env)?;
         if envs.is_empty() {
             cmd.env_remove("RUSTC_WRAPPER");
             cmd.env_remove("CARGO_BUILD_RUSTC_WRAPPER");
-        } else {
-            if let Some(ref bin) = sccache_bin {
-                // Best-effort pre-warm local sccache server with S3 credentials
-                let mut start_cmd = std::process::Command::new(bin);
-                start_cmd.arg("--start-server");
-                for (k, v) in &sccache_extra_env {
-                    start_cmd.env(k, v);
+            return Ok(());
+        }
+
+        if let Some(ref bin) = sccache_bin {
+            if let Err(health_err) = Self::ensure_sccache_server_healthy(bin, &sccache_extra_env) {
+                if mode == SccacheMode::Mandatory {
+                    return Err(format!(
+                        "Stage '{}' (task '{}') requires sccache: mandatory, but {}",
+                        task.stage_id, inv.task_id, health_err
+                    ));
                 }
-                let _ = start_cmd.output();
+                warn!(
+                    job_id = %task.job_id,
+                    stage_id = %task.stage_id,
+                    task_id = %inv.task_id,
+                    error = %health_err,
+                    "sccache mode is 'try' but sccache health check failed; proceeding without sccache"
+                );
+                cmd.env_remove("RUSTC_WRAPPER");
+                cmd.env_remove("CARGO_BUILD_RUSTC_WRAPPER");
+                return Ok(());
             }
-            for (k, v) in envs {
-                cmd.env(k, v);
-            }
+        }
+
+        for (k, v) in envs {
+            cmd.env(k, v);
         }
         Ok(())
     }
@@ -2385,9 +2502,16 @@ allow_spacemit_ai_thread: false
         );
         assert_eq!(map.get("CARGO_INCREMENTAL").map(String::as_str), Some("0"));
         assert_eq!(
+            map.get("SCCACHE_IDLE_TIMEOUT").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
             map.get("SCCACHE_BUCKET").map(String::as_str),
             Some("sccache")
         );
+
+        // 1b. cargo-check is also eligible for sccache
+        assert!(StageRunner::is_sccache_eligible_tool("cargo-check"));
 
         // 2. SccacheMode::Try when sccache binary is missing -> falls back gracefully (Ok(empty))
         let envs_missing = runner
@@ -2435,5 +2559,104 @@ allow_spacemit_ai_thread: false
                 "Tool {excluded} must not inject RUSTC_WRAPPER"
             );
         }
+
+        // 6. Mixed stage: stage-level sccache_mode is Mandatory (for worker tag routing),
+        //    but individual tasks preserve their resolved Try / Off / Mandatory modes.
+        let mixed_stage = StageDispatchTask {
+            job_id: "j-mixed".into(),
+            stage_id: "s-mixed".into(),
+            sccache_mode: SccacheMode::Mandatory,
+            tasks: vec![inv_clippy.clone(), inv_off.clone(), inv_mandatory.clone()],
+            ..Default::default()
+        };
+        assert_eq!(
+            StageRunner::resolve_effective_sccache_mode(&mixed_stage, &mixed_stage.tasks[0]),
+            SccacheMode::Try
+        );
+        assert_eq!(
+            StageRunner::resolve_effective_sccache_mode(&mixed_stage, &mixed_stage.tasks[1]),
+            SccacheMode::Off
+        );
+        assert_eq!(
+            StageRunner::resolve_effective_sccache_mode(&mixed_stage, &mixed_stage.tasks[2]),
+            SccacheMode::Mandatory
+        );
+    }
+
+    #[test]
+    fn test_ensure_sccache_server_healthy_and_local_disk_hijack_recovery() {
+        let extra = vec![("SCCACHE_BUCKET".to_string(), "sccache".to_string())];
+        let mut daemon_state = "local_disk".to_string();
+
+        // 1. Auto-recover when daemon started in Local disk mode despite SCCACHE_BUCKET
+        StageRunner::ensure_sccache_server_healthy_with(&extra, |arg, _| match arg {
+            "--stop-server" => {
+                if daemon_state != "permanently_broken" {
+                    daemon_state = "stopped".to_string();
+                }
+                Ok((Some(0), String::new(), String::new()))
+            }
+            "--show-stats" => match daemon_state.as_str() {
+                "local_disk" => Ok((
+                    Some(0),
+                    "Cache location                  Local disk: /tmp/sccache".to_string(),
+                    String::new(),
+                )),
+                "stopped" | "s3" => {
+                    daemon_state = "s3".to_string();
+                    Ok((
+                        Some(0),
+                        "Cache location                  S3, bucket: Bucket(name=sccache)"
+                            .to_string(),
+                        String::new(),
+                    ))
+                }
+                _ => Ok((Some(1), String::new(), "sccache daemon error".to_string())),
+            },
+            _ => Err("unexpected arg".to_string()),
+        })
+        .expect("should auto-recover from Local disk hijack to S3");
+        assert_eq!(
+            daemon_state, "s3",
+            "Daemon must have been stopped and restarted in S3 mode"
+        );
+
+        // 2. Transiently wedged daemon (healed by --stop-server + retry)
+        daemon_state = "wedged".to_string();
+        StageRunner::ensure_sccache_server_healthy_with(&extra, |arg, _| match arg {
+            "--stop-server" => {
+                daemon_state = "stopped".to_string();
+                Ok((Some(0), String::new(), String::new()))
+            }
+            "--show-stats" => match daemon_state.as_str() {
+                "stopped" | "s3" => {
+                    daemon_state = "s3".to_string();
+                    Ok((
+                        Some(0),
+                        "Cache location                  S3, bucket: Bucket(name=sccache)"
+                            .to_string(),
+                        String::new(),
+                    ))
+                }
+                _ => Ok((Some(1), String::new(), "wedged socket".to_string())),
+            },
+            _ => Err("unexpected arg".to_string()),
+        })
+        .expect("should auto-recover from transiently wedged daemon");
+        assert_eq!(daemon_state, "s3");
+
+        // 3. Permanently broken daemon fails health check
+        let err = StageRunner::ensure_sccache_server_healthy_with(&extra, |arg, _| match arg {
+            "--stop-server" => Ok((Some(0), String::new(), String::new())),
+            "--show-stats" => Ok((
+                Some(1),
+                String::new(),
+                "S3 endpoint unreachable".to_string(),
+            )),
+            _ => Err("unexpected arg".to_string()),
+        })
+        .expect_err("broken daemon must return Err");
+        assert!(err.contains("sccache health check failed"));
+        assert!(err.contains("S3 endpoint unreachable"));
     }
 }

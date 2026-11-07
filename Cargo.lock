@@ -30,7 +30,7 @@ dependencies = [
 [[package]]
 name = "action-runner-ipc"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/ActionRunner-ipc.git?branch=feat%2Fsccache-support#71360353754be6591bfaa0469aac1c8b81d365e4"
+source = "git+https://github.com/LMA1980/ActionRunner-ipc.git?branch=main#ed1e90aa954704137d8182f8ad0961c020d6d8b6"
 dependencies = [
  "arrow",
  "bytes",
