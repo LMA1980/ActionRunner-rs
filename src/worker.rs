@@ -1,12 +1,12 @@
-use action_runner_ipc::{
+use chrono::Utc;
+use futures_util::{SinkExt, StreamExt};
+use mu_ci_ipc::{
     create_fory_runtime, IpcHeader, StageCancelTask, StageCompletionReport, StageDispatchTask,
     StageStarted, WorkerHeartbeat, WorkerRegistration, WorkerShutdown, MSG_TYPE_ARROW_LOG,
     MSG_TYPE_STAGE_CANCEL, MSG_TYPE_STAGE_COMPLETION, MSG_TYPE_STAGE_DISPATCH,
     MSG_TYPE_STAGE_STARTED, MSG_TYPE_WORKER_HEARTBEAT, MSG_TYPE_WORKER_REGISTRATION,
     MSG_TYPE_WORKER_SHUTDOWN,
 };
-use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -302,7 +302,7 @@ impl WorkerAgent {
             seq,
         );
 
-        let mut reg_frame = Vec::with_capacity(action_runner_ipc::HEADER_SIZE + reg_payload.len());
+        let mut reg_frame = Vec::with_capacity(mu_ci_ipc::HEADER_SIZE + reg_payload.len());
         reg_frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&reg_hdr));
         reg_frame.extend_from_slice(&reg_payload);
         let write_timeout = std::env::var("ACTION_RUNNER_WRITE_TIMEOUT_SECS")
@@ -364,8 +364,7 @@ impl WorkerAgent {
                     hb_seq += 1;
                     let hdr =
                         IpcHeader::new(MSG_TYPE_WORKER_HEARTBEAT, payload.len() as u32, 0, hb_seq);
-                    let mut frame =
-                        Vec::with_capacity(action_runner_ipc::HEADER_SIZE + payload.len());
+                    let mut frame = Vec::with_capacity(mu_ci_ipc::HEADER_SIZE + payload.len());
                     frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
                     frame.extend_from_slice(&payload);
                     if hb_tx.send(frame).await.is_err() {
@@ -423,7 +422,7 @@ impl WorkerAgent {
                                 0,
                                 seq,
                             );
-                            let mut frame = Vec::with_capacity(action_runner_ipc::HEADER_SIZE + payload.len());
+                            let mut frame = Vec::with_capacity(mu_ci_ipc::HEADER_SIZE + payload.len());
                             frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
                             frame.extend_from_slice(&payload);
                             let _ = tokio::time::timeout(
@@ -586,7 +585,7 @@ impl WorkerAgent {
                                                             999,
                                                         );
                                                         let mut frame = Vec::with_capacity(
-                                                            action_runner_ipc::HEADER_SIZE
+                                                            mu_ci_ipc::HEADER_SIZE
                                                                 + comp_payload.len(),
                                                         );
                                                         frame.extend_from_slice(
@@ -659,7 +658,7 @@ impl WorkerAgent {
                                                                     1001,
                                                                 );
                                                                 let mut sframe = Vec::with_capacity(
-                                                                    action_runner_ipc::HEADER_SIZE
+                                                                    mu_ci_ipc::HEADER_SIZE
                                                                         + spayload.len(),
                                                                 );
                                                                 sframe.extend_from_slice(
@@ -695,7 +694,7 @@ impl WorkerAgent {
                                                                 l_seq,
                                                             );
                                                             let mut frame = Vec::with_capacity(
-                                                                action_runner_ipc::HEADER_SIZE
+                                                                mu_ci_ipc::HEADER_SIZE
                                                                     + batch_bytes.len(),
                                                             );
                                                             frame.extend_from_slice(
@@ -749,7 +748,7 @@ impl WorkerAgent {
                                                         999,
                                                     );
                                                     let mut frame = Vec::with_capacity(
-                                                        action_runner_ipc::HEADER_SIZE
+                                                        mu_ci_ipc::HEADER_SIZE
                                                             + comp_payload.len(),
                                                     );
                                                     frame.extend_from_slice(

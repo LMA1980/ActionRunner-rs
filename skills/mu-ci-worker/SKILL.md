@@ -1,16 +1,16 @@
 ---
-name: action-runner-worker
-description: "Configure and debug the ActionRunner distributed CI worker daemon, single-slot stage execution, and isolated service-account toolchains."
+name: mu-ci-worker
+description: "Configure and debug the MuCI distributed CI worker daemon (mu-ci-worker), single-slot stage execution, and isolated service-account toolchains."
 ---
 
-# `action-runner` Worker Daemon & Execution Invariants
+# `mu-ci-worker` Worker Daemon & Execution Invariants
 
-Use these invariants when developing or deploying the `action-runner` worker agent:
+Use these invariants when developing or deploying the `mu-ci-worker` worker agent:
 
 ## 1. Single-Slot Execution vs. Thread Budget (`max_slots = 1`)
 
-- Every `action-runner` worker node enforces `max_slots = 1` (at most one active CI stage process per node at a time).
-- Bound intra-stage parallelism strictly via thread budget environment variables (`CARGO_BUILD_JOBS`, `RAYON_NUM_THREADS`, `RUST_TEST_THREADS`). Never increase `ACTION_RUNNER_SLOTS` when adjusting CPU/thread allocation.
+- Every `mu-ci-worker` worker node enforces `max_slots = 1` (at most one active CI stage process per node at a time).
+- Bound intra-stage parallelism strictly via thread budget environment variables (`CARGO_BUILD_JOBS`, `RAYON_NUM_THREADS`, `RUST_TEST_THREADS`). Never increase `ACTION_RUNNER_SLOTS` or `MU_CI_SLOTS` when adjusting CPU/thread allocation.
 
 ## 2. Isolated Service Account Toolchains (`action-runner`)
 

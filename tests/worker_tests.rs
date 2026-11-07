@@ -1,9 +1,7 @@
-use action_runner::config::{IsolationMode, WorkerConfig};
-use action_runner::stage_runner::StageRunner;
-use action_runner::worker::WorkerAgent;
-use action_runner_ipc::{
-    decode_log_batch, SandboxConstraintSpec, StageDispatchTask, TypedTaskInvocation,
-};
+use mu_ci_ipc::{decode_log_batch, SandboxConstraintSpec, StageDispatchTask, TypedTaskInvocation};
+use mu_ci_worker::config::{IsolationMode, WorkerConfig};
+use mu_ci_worker::stage_runner::StageRunner;
+use mu_ci_worker::worker::WorkerAgent;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -418,12 +416,12 @@ async fn test_path_traversal_rejection_malicious_repo_and_ids() {
 
 #[tokio::test]
 async fn test_stage_runner_streams_spans_and_correlated_logs_to_muobserve_collector() {
-    use action_runner::telemetry_emitter::{
+    use mu_ci_worker::telemetry_emitter::{
         decode_log_batch as decode_otel_logs, decode_span_batch, read_frame, write_frame,
         IpcHeader, TelemetryEmitter, MSG_TYPE_ARROW_OTEL_LOGS, MSG_TYPE_ARROW_OTEL_SPANS,
         MSG_TYPE_WAL_ACK,
     };
-    use muobserve_ipc::{create_fory_runtime, WalBatchAck};
+    use mu_observable_ipc::{create_fory_runtime, WalBatchAck};
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -486,7 +484,7 @@ async fn test_stage_runner_streams_spans_and_correlated_logs_to_muobserve_collec
         job_id: "job-otel-1".to_string(),
         stage_id: "stage-otel-1".to_string(),
         stage_name: "Otel Span Test".to_string(),
-        repo_name: "LMA1980/ActionRunner-rs".to_string(),
+        repo_name: "LMA1980/mu-ci-worker".to_string(),
         clone_url: "".to_string(),
         commit_sha: "cafebabe".to_string(),
         command: "".to_string(),

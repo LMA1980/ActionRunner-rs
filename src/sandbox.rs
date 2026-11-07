@@ -8,12 +8,12 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use action_runner_ipc::{
+use mu_ci_ipc::{
     NetworkEgressMode as IpcNetworkEgressMode, SandboxBackendKind as IpcBackendKind,
     SandboxConstraintSpec, SecurityGrantDenied, StageDispatchTask,
 };
-use mu_isolation::prelude::*;
-use mu_isolation::{
+use mu_ci_isolation::prelude::*;
+use mu_ci_isolation::{
     DesiredProfileConfig, DesiredSecurityFile, EffectiveSandboxPolicy, HostCeilingConfig,
     IsolationBackend, IsolationError, KernelSandbox, NetworkEgressMode as MuNetworkEgressMode,
     SandboxBackendKind as MuBackendKind, SandboxExecutionPlan, TaskSandboxConfig,
@@ -138,7 +138,7 @@ impl WorkerSandboxRunner {
             node_id,
             arch,
             ceiling_path,
-            proc_ai_thread_path: PathBuf::from(mu_isolation::DEFAULT_SET_AI_THREAD_PATH),
+            proc_ai_thread_path: PathBuf::from(mu_ci_isolation::DEFAULT_SET_AI_THREAD_PATH),
         }
     }
 
@@ -166,15 +166,23 @@ impl WorkerSandboxRunner {
         }
     }
 
-    /// Load the repository desired security profiles from `.actionrunner/security.yml`.
+    /// Load the repository desired security profiles from `.muci/security.yml` (falling back to legacy `.actionrunner/security.yml`).
     pub fn load_desired_security(
         &self,
         stage_dir: &Path,
         ceiling: &HostCeilingConfig,
     ) -> Result<DesiredSecurityFile, IsolationError> {
-        let sec_path = stage_dir.join(".actionrunner/security.yml");
-        if sec_path.is_file() {
-            DesiredSecurityFile::from_path(&sec_path)
+        let muci_sec_path = stage_dir.join(".muci/security.yml");
+        let legacy_sec_path = stage_dir.join(".actionrunner/security.yml");
+        let sec_path = if muci_sec_path.is_file() {
+            Some(muci_sec_path)
+        } else if legacy_sec_path.is_file() {
+            Some(legacy_sec_path)
+        } else {
+            None
+        };
+        if let Some(path) = sec_path {
+            DesiredSecurityFile::from_path(&path)
         } else {
             Ok(default_security_file_from_ceiling(ceiling))
         }
@@ -236,7 +244,7 @@ impl WorkerSandboxRunner {
         #[cfg(not(target_os = "linux"))]
         let tid = std::process::id();
 
-        mu_isolation::register_ai_thread_if_present(
+        mu_ci_isolation::register_ai_thread_if_present(
             &self.proc_ai_thread_path,
             tid,
             policy.cpu_affinity_mask,
@@ -271,7 +279,7 @@ impl WorkerSandboxRunner {
                 "DesiredProfile".to_string(),
                 "profile_name".to_string(),
                 profile_name.clone(),
-                "Defined profiles in .actionrunner/security.yml".to_string(),
+                "Defined profiles in .muci/security.yml or .actionrunner/security.yml".to_string(),
             ),
             other => (
                 "SandboxPolicy".to_string(),

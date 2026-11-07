@@ -147,7 +147,7 @@ impl NodeConcurrencyLimiter {
     /// Helper to acquire lock for a `StageDispatchTask`.
     pub async fn acquire_for_task(
         &self,
-        task: &action_runner_ipc::StageDispatchTask,
+        task: &mu_ci_ipc::StageDispatchTask,
     ) -> Result<NodeStageLockGuard, AcquireError> {
         self.acquire(task.exclusive, task.max_concurrent_per_node)
             .await

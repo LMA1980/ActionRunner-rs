@@ -1,8 +1,8 @@
-use action_runner_ipc::{
+use chrono::Utc;
+use mu_ci_ipc::{
     encode_log_batch, LogEntry, SccacheMode, SecurityGrantDenied, StageDispatchTask,
     TypedTaskInvocation,
 };
-use chrono::Utc;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -30,13 +30,13 @@ pub enum RunnerError {
     ProhibitedShellInvocation { tool: String, reason: String },
 
     #[error("Tool validation error: {0}")]
-    ToolValidation(#[from] action_runner_tools::ToolValidationError),
+    ToolValidation(#[from] mu_ci_tools::ToolValidationError),
 
     #[error("Tool build error: {0}")]
-    ToolBuild(#[from] action_runner_tools::ToolBuildError),
+    ToolBuild(#[from] mu_ci_tools::ToolBuildError),
 
     #[error("Sandbox isolation error: {0}")]
-    Isolation(#[from] mu_isolation::IsolationError),
+    Isolation(#[from] mu_ci_isolation::IsolationError),
 
     #[error("Security grant denied: {0:?}")]
     SecurityGrantDenied(Box<SecurityGrantDenied>),
@@ -56,14 +56,14 @@ pub enum RunnerError {
 pub fn validate_no_shell_invocation(tool_name: &str, argv: &[OsString]) -> Result<(), RunnerError> {
     let is_prohibited_shell = |token: &str| -> bool {
         let lower = token.trim().to_ascii_lowercase();
-        if action_runner_tools::is_prohibited_shell_wrapper(&lower) {
+        if mu_ci_tools::is_prohibited_shell_wrapper(&lower) {
             return true;
         }
         let file_name = Path::new(&lower)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
-        !file_name.is_empty() && action_runner_tools::is_prohibited_shell_wrapper(&file_name)
+        !file_name.is_empty() && mu_ci_tools::is_prohibited_shell_wrapper(&file_name)
     };
 
     let tool_trimmed = tool_name.trim();
@@ -301,38 +301,38 @@ impl StageExecutionResult {
 }
 
 /// Helper creating a ToolRegistry equipped with built-in adapters and extended flag support for worker diagnostics.
-fn build_worker_tool_registry() -> action_runner_tools::ToolRegistry {
-    let mut registry = action_runner_tools::ToolRegistry::with_builtin_adapters();
+fn build_worker_tool_registry() -> mu_ci_tools::ToolRegistry {
+    let mut registry = mu_ci_tools::ToolRegistry::with_builtin_adapters();
 
     struct WorkerCargoFmtAdapter;
-    impl action_runner_tools::ToolAdapter for WorkerCargoFmtAdapter {
+    impl mu_ci_tools::ToolAdapter for WorkerCargoFmtAdapter {
         fn name(&self) -> &'static str {
             "cargo-fmt"
         }
 
         fn validate(
             &self,
-            inv: &action_runner_tools::ToolInvocation,
-        ) -> Result<(), action_runner_tools::ToolValidationError> {
-            action_runner_tools::validate_invocation_base(inv)?;
+            inv: &mu_ci_tools::ToolInvocation,
+        ) -> Result<(), mu_ci_tools::ToolValidationError> {
+            mu_ci_tools::validate_invocation_base(inv)?;
             let has_version = inv.args.iter().any(|a| a == "--version");
             if has_version {
                 for arg in &inv.args {
                     match arg.as_str() {
                         "--all" | "--check" | "--version" => {}
-                        _ => return action_runner_tools::adapters::CargoFmtAdapter.validate(inv),
+                        _ => return mu_ci_tools::adapters::CargoFmtAdapter.validate(inv),
                     }
                 }
                 Ok(())
             } else {
-                action_runner_tools::adapters::CargoFmtAdapter.validate(inv)
+                mu_ci_tools::adapters::CargoFmtAdapter.validate(inv)
             }
         }
 
         fn build_argv(
             &self,
-            inv: &action_runner_tools::ToolInvocation,
-        ) -> Result<Vec<OsString>, action_runner_tools::ToolBuildError> {
+            inv: &mu_ci_tools::ToolInvocation,
+        ) -> Result<Vec<OsString>, mu_ci_tools::ToolBuildError> {
             self.validate(inv)?;
             let mut argv = vec![OsString::from("cargo"), OsString::from("fmt")];
             for arg in &inv.args {
@@ -343,9 +343,9 @@ fn build_worker_tool_registry() -> action_runner_tools::ToolRegistry {
 
         fn sandbox_profile(
             &self,
-            inv: &action_runner_tools::ToolInvocation,
-        ) -> action_runner_tools::adapter::SandboxProfileRequirement {
-            let mut profile = action_runner_tools::adapters::CargoFmtAdapter.sandbox_profile(inv);
+            inv: &mu_ci_tools::ToolInvocation,
+        ) -> mu_ci_tools::adapter::SandboxProfileRequirement {
+            let mut profile = mu_ci_tools::adapters::CargoFmtAdapter.sandbox_profile(inv);
             if inv.args.iter().any(|a| a == "--version") {
                 profile.writable_dirs = Vec::new();
             }
@@ -357,11 +357,9 @@ fn build_worker_tool_registry() -> action_runner_tools::ToolRegistry {
             stdout: &[u8],
             stderr: &[u8],
             exit_code: i32,
-        ) -> Result<
-            action_runner_tools::adapter::ToolExecutionMetrics,
-            action_runner_tools::MetricParseError,
-        > {
-            action_runner_tools::adapters::CargoFmtAdapter.parse_metrics(stdout, stderr, exit_code)
+        ) -> Result<mu_ci_tools::adapter::ToolExecutionMetrics, mu_ci_tools::MetricParseError>
+        {
+            mu_ci_tools::adapters::CargoFmtAdapter.parse_metrics(stdout, stderr, exit_code)
         }
     }
 
@@ -589,7 +587,7 @@ impl StageRunner {
             }
 
             for arg in &inv.args {
-                if action_runner_tools::is_prohibited_shell_wrapper(arg) {
+                if mu_ci_tools::is_prohibited_shell_wrapper(arg) {
                     let err = RunnerError::ProhibitedShellInvocation {
                         tool: inv.tool_name.clone(),
                         reason: format!("prohibited shell wrapper or flag in args: '{arg}'"),
@@ -654,8 +652,7 @@ impl StageRunner {
             };
 
             // 3. Construct ToolInvocation, validate, and build_argv
-            let mut tool_inv =
-                action_runner_tools::ToolInvocation::new(&inv.tool_name, inv.args.clone());
+            let mut tool_inv = mu_ci_tools::ToolInvocation::new(&inv.tool_name, inv.args.clone());
             if let Some(wd) = &inv.working_dir {
                 tool_inv = tool_inv.with_working_dir(PathBuf::from(wd));
             }
@@ -762,7 +759,7 @@ impl StageRunner {
             }
 
             // 5. #20 & #21: Attenuate sandbox constraints
-            let spec = if inv.sandbox != action_runner_ipc::SandboxConstraintSpec::default() {
+            let spec = if inv.sandbox != mu_ci_ipc::SandboxConstraintSpec::default() {
                 &inv.sandbox
             } else {
                 &task.sandbox_constraints
@@ -1883,7 +1880,7 @@ impl StageRunner {
 mod tests {
     use super::*;
     use crate::config::IsolationMode;
-    use action_runner_ipc::{SandboxConstraintSpec, TypedTaskInvocation};
+    use mu_ci_ipc::{SandboxConstraintSpec, TypedTaskInvocation};
     use tempfile::tempdir;
 
     #[test]
@@ -2006,11 +2003,11 @@ mod tests {
         let (tx, _rx) = mpsc::channel(10);
 
         // Verify cargo-build argv building and validation
-        let registry = action_runner_tools::ToolRegistry::with_builtin_adapters();
+        let registry = mu_ci_tools::ToolRegistry::with_builtin_adapters();
         let adapter = registry
             .get("cargo-build")
             .expect("cargo-build adapter must exist");
-        let tool_inv = action_runner_tools::ToolInvocation::new("cargo-build", ["--release"]);
+        let tool_inv = mu_ci_tools::ToolInvocation::new("cargo-build", ["--release"]);
         assert!(adapter.validate(&tool_inv).is_ok());
         let argv = adapter.build_argv(&tool_inv).unwrap();
         assert_eq!(argv[0], "cargo");
@@ -2022,7 +2019,7 @@ mod tests {
         let md_adapter = registry
             .get("mdformat")
             .expect("mdformat adapter must exist");
-        let md_inv = action_runner_tools::ToolInvocation::new("mdformat", ["--check", "README.md"]);
+        let md_inv = mu_ci_tools::ToolInvocation::new("mdformat", ["--check", "README.md"]);
         assert!(md_adapter.validate(&md_inv).is_ok());
         let md_argv = md_adapter.build_argv(&md_inv).unwrap();
         assert_eq!(md_argv[0], "mdformat");
@@ -2311,7 +2308,7 @@ allow_spacemit_ai_thread: false
             job_id: "job-trace-33".into(),
             stage_id: "stage-fmt-33".into(),
             stage_name: "fmt".into(),
-            repo_name: "LMA1980/ActionRunner-rs".into(),
+            repo_name: "LMA1980/mu-ci-worker".into(),
             clone_url: "".into(),
             commit_sha: "deadbeef".into(),
             command: "".into(),

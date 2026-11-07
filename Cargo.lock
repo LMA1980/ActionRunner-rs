@@ -3,58 +3,6 @@
 version = 4
 
 [[package]]
-name = "action-runner"
-version = "0.2.0"
-dependencies = [
- "action-runner-ipc",
- "action-runner-tools",
- "arrow",
- "chrono",
- "fory",
- "futures-util",
- "libc",
- "mu-isolation",
- "muobserve-ipc",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "zerocopy",
-]
-
-[[package]]
-name = "action-runner-ipc"
-version = "0.1.0"
-source = "git+https://github.com/LMA1980/ActionRunner-ipc.git?branch=main#ed1e90aa954704137d8182f8ad0961c020d6d8b6"
-dependencies = [
- "arrow",
- "bytes",
- "chrono",
- "fory",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "zerocopy",
-]
-
-[[package]]
-name = "action-runner-tools"
-version = "0.1.0"
-source = "git+https://github.com/LMA1980/ActionRunner-tools.git?branch=main#0939fa26111c2a5c7c27c9a48e8e8165c562f305"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -804,9 +752,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "mu-isolation"
+name = "mu-ci-ipc"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/MuIsolation.git?branch=main#dfaa8524028fec54fb9d54ca10549d27339e36e5"
+source = "git+https://github.com/LMA1980/mu-ci-ipc.git?branch=feat%2Fm8-naming-alignment#7339993636e3a54c2d6b8d2b0261f060d5e1911f"
+dependencies = [
+ "arrow",
+ "bytes",
+ "chrono",
+ "fory",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "zerocopy",
+]
+
+[[package]]
+name = "mu-ci-isolation"
+version = "0.1.0"
+source = "git+https://github.com/LMA1980/mu-ci-isolation.git?branch=feat%2Fm8-naming-alignment#98117ee3d6270c6ca9f290c2881515db65d7147b"
 dependencies = [
  "landlock",
  "libc",
@@ -819,9 +784,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "muobserve-ipc"
+name = "mu-ci-tools"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/MuObserve-ipc.git?branch=main#72476e02a6dc873a7a9122a7f4f55cf91ac88836"
+source = "git+https://github.com/LMA1980/mu-ci-tools.git?branch=feat%2Fm8-naming-alignment#23341f16720d22530f488f6f3d39cf5bc0a47ea7"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "mu-ci-worker"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "chrono",
+ "fory",
+ "futures-util",
+ "libc",
+ "mu-ci-ipc",
+ "mu-ci-isolation",
+ "mu-ci-tools",
+ "mu-observable-ipc",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "zerocopy",
+]
+
+[[package]]
+name = "mu-observable-ipc"
+version = "0.1.0"
+source = "git+https://github.com/LMA1980/mu-observable-ipc.git?branch=feat%2Fm8-naming-alignment#28793ce66732461cb68c3aef3006154939265abb"
 dependencies = [
  "arrow",
  "bytes",

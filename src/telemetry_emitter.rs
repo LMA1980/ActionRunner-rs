@@ -6,13 +6,13 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use action_runner_ipc::{
+use chrono::Utc;
+use mu_ci_ipc::{
     BenchmarkRunRecord, LogEntry, StageDispatchTask, TestCaseRunRecord, TypedTaskInvocation,
 };
-use action_runner_tools::{ParsedBenchmark, TestCaseStatus, ToolExecutionMetrics};
-use chrono::Utc;
-pub use muobserve_ipc::TraceContext as W3cTraceContext;
-pub use muobserve_ipc::{
+use mu_ci_tools::{ParsedBenchmark, TestCaseStatus, ToolExecutionMetrics};
+pub use mu_observable_ipc::TraceContext as W3cTraceContext;
+pub use mu_observable_ipc::{
     decode_benchmark_run_batch, decode_log_batch, decode_span_batch, decode_test_run_batch,
     encode_benchmark_run_batch, encode_log_batch, encode_span_batch, encode_test_run_batch,
     read_frame, write_frame, BenchmarkRunEntry, DeterministicSecretRedactor, IpcHeader,
@@ -786,8 +786,8 @@ impl TelemetryEmitter {
 mod tests {
     use super::*;
     use crate::config::IsolationMode;
-    use action_runner_ipc::SandboxConstraintSpec;
-    use action_runner_tools::ParsedTestCase;
+    use mu_ci_ipc::SandboxConstraintSpec;
+    use mu_ci_tools::ParsedTestCase;
     use std::path::PathBuf;
     use tokio::net::TcpListener;
 
