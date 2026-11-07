@@ -211,7 +211,10 @@ impl WorkerConfig {
                 if let Some((k, v)) = trimmed.split_once('=') {
                     let key = k.trim().trim_start_matches("export ").trim().to_string();
                     let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
-                    if !key.is_empty() {
+                    if !key.is_empty()
+                        && !key.eq_ignore_ascii_case("RUSTC_WRAPPER")
+                        && !key.eq_ignore_ascii_case("CARGO_BUILD_RUSTC_WRAPPER")
+                    {
                         envs.push((key, val));
                     }
                 }
@@ -226,6 +229,8 @@ impl WorkerConfig {
             "SCCACHE_DIR",
             "SCCACHE_CACHE_SIZE",
             "SCCACHE_SERVER_PORT",
+            "SCCACHE_SERVER_UDS",
+            "SCCACHE_IDLE_TIMEOUT",
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",
         ] {
