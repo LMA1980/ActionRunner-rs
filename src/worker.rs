@@ -43,6 +43,77 @@ async fn wait_for_shutdown_signal() {
     tracing::info!("Received Ctrl-C shutdown signal");
 }
 
+/// Parse Linux `/proc/meminfo` text and return `(ram_total_mb, ram_used_mb)`.
+///
+/// `ram_total_mb` is derived from `MemTotal` (in KiB / 1024).
+/// `ram_used_mb` is derived from `(MemTotal - MemAvailable)` (or `MemFree + Buffers + Cached`
+/// when `MemAvailable` is absent).
+pub fn parse_proc_meminfo(contents: &str) -> Option<(u64, u64)> {
+    let mut mem_total_kb: Option<u64> = None;
+    let mut mem_available_kb: Option<u64> = None;
+    let mut mem_free_kb: u64 = 0;
+    let mut buffers_kb: u64 = 0;
+    let mut cached_kb: u64 = 0;
+
+    for line in contents.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(key) = parts.next() else {
+            continue;
+        };
+        let Some(val_str) = parts.next() else {
+            continue;
+        };
+        let Ok(val_kb) = val_str.parse::<u64>() else {
+            continue;
+        };
+        match key {
+            "MemTotal:" => mem_total_kb = Some(val_kb),
+            "MemAvailable:" => mem_available_kb = Some(val_kb),
+            "MemFree:" => mem_free_kb = val_kb,
+            "Buffers:" => buffers_kb = val_kb,
+            "Cached:" => cached_kb = val_kb,
+            _ => {}
+        }
+    }
+
+    let total_kb = mem_total_kb.filter(|&t| t > 0)?;
+    let avail_kb = mem_available_kb
+        .unwrap_or_else(|| {
+            mem_free_kb
+                .saturating_add(buffers_kb)
+                .saturating_add(cached_kb)
+        })
+        .min(total_kb);
+    let used_kb = total_kb.saturating_sub(avail_kb);
+
+    let total_mb = (total_kb / 1024).max(1);
+    let used_mb = (used_kb / 1024).min(total_mb);
+    Some((total_mb, used_mb))
+}
+
+/// Detect the host's physical total RAM and currently used RAM in MiB.
+///
+/// Reads `/proc/meminfo` on Linux, with optional override via `ACTION_RUNNER_RAM_TOTAL_MB`.
+/// Falls back to `(32768, 1024)` on non-Linux hosts where `/proc/meminfo` is unavailable.
+pub fn detect_system_memory_mb() -> (u64, u64) {
+    let detected = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| parse_proc_meminfo(&s));
+
+    let (mut total_mb, mut used_mb) = detected.unwrap_or((32768, 1024));
+
+    if let Some(override_total) = std::env::var("ACTION_RUNNER_RAM_TOTAL_MB")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+    {
+        total_mb = override_total;
+        used_mb = used_mb.min(total_mb);
+    }
+
+    (total_mb, used_mb)
+}
+
 pub struct WorkerAgent {
     config: WorkerConfig,
     limiter: Arc<NodeConcurrencyLimiter>,
@@ -211,12 +282,13 @@ impl WorkerAgent {
         let mut seq = 0u64;
 
         // 1. Send WorkerRegistration frame
+        let (ram_total_mb, _) = detect_system_memory_mb();
         let reg = WorkerRegistration {
             node_id: self.config.node_id.clone(),
             arch: self.config.arch.clone(),
             tags: self.config.tags.clone(),
             max_slots: self.config.max_slots,
-            ram_total_mb: 32768, // Detected or configured
+            ram_total_mb,
             btrfs_enabled: self.config.use_btrfs,
             toolchains: self.config.toolchains.clone(),
         };
@@ -279,11 +351,12 @@ impl WorkerAgent {
                     .and_then(|s| s.split_whitespace().next()?.parse::<f32>().ok())
                     .map(|load1| ((load1 / num_cpus) * 100.0).clamp(0.0, 100.0))
                     .unwrap_or(10.0);
+                let (_, ram_used_mb) = detect_system_memory_mb();
                 let hb = WorkerHeartbeat {
                     node_id: node_id.clone(),
                     active_slots: active_slots.load(Ordering::Relaxed),
                     cpu_load_pct,
-                    ram_used_mb: 1024,
+                    ram_used_mb,
                     timestamp_epoch_ms: Utc::now().timestamp_millis() as u64,
                 };
 
@@ -746,5 +819,65 @@ impl WorkerAgent {
 
         hb_handle.abort();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_proc_meminfo_4gib_worker() {
+        let sample = "\
+MemTotal:        3884032 kB
+MemFree:         2949120 kB
+MemAvailable:    3369984 kB
+Buffers:           40960 kB
+Cached:           419840 kB
+";
+        let (total_mb, used_mb) = parse_proc_meminfo(sample).expect("valid 4 GiB meminfo");
+        assert_eq!(total_mb, 3793);
+        assert_eq!(used_mb, 502);
+    }
+
+    #[test]
+    fn test_parse_proc_meminfo_16gib_and_32gib_workers() {
+        let sample_16g = "\
+MemTotal:       16384000 kB
+MemFree:        10240000 kB
+MemAvailable:   14336000 kB
+";
+        let (total_16, used_16) = parse_proc_meminfo(sample_16g).expect("valid 16 GiB meminfo");
+        assert_eq!(total_16, 16000);
+        assert_eq!(used_16, 2000);
+
+        let sample_32g = "\
+MemTotal:       33554432 kB
+MemFree:        25165824 kB
+MemAvailable:   30408704 kB
+";
+        let (total_32, used_32) = parse_proc_meminfo(sample_32g).expect("valid 32 GiB meminfo");
+        assert_eq!(total_32, 32768);
+        assert_eq!(used_32, 3072);
+    }
+
+    #[test]
+    fn test_parse_proc_meminfo_fallback_without_mem_available() {
+        let sample = "\
+MemTotal:        4194304 kB
+MemFree:         1048576 kB
+Buffers:          524288 kB
+Cached:          1572864 kB
+";
+        let (total_mb, used_mb) =
+            parse_proc_meminfo(sample).expect("fallback without MemAvailable");
+        assert_eq!(total_mb, 4096);
+        assert_eq!(used_mb, 1024);
+    }
+
+    #[test]
+    fn test_parse_proc_meminfo_invalid_returns_none() {
+        assert_eq!(parse_proc_meminfo(""), None);
+        assert_eq!(parse_proc_meminfo("MemTotal: 0 kB\n"), None);
     }
 }
