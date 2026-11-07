@@ -93,20 +93,108 @@ Workflows are defined in YAML and triggered based on GitHub webhook events:
 
 ## Configuration
 
-Environment variables configured in `/etc/systemd/system/action-runner.service`:
+Environment variables configured in `/etc/action-runner/worker.env` (loaded by `action-runner-worker.service`):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ACTION_RUNNER_BIND` | `127.0.0.1:8000` | Local listen socket address behind Nginx reverse proxy |
-| `ACTION_RUNNER_WORKSPACE` | `/var/lib/action-runner/workspace` | Base directory for repositories and build logs |
-| `ACTION_RUNNER_ALLOWED_REPOS` | `LMA1980/*` | Whitelisted repositories permitted to execute CI steps |
-| `ACTION_RUNNER_ALLOWED_ACTORS` | `*` (all) | Whitelisted GitHub logins allowed to trigger CI builds |
-| `ACTION_RUNNER_ALLOW_FORK_PRS` | `false` | Disallow untrusted fork PRs from executing on bare-metal host |
-| `ACTION_RUNNER_ALLOWED_PR_AUTHORS` | `OWNER,MEMBER,COLLABORATOR` | Permitted author associations for automated PR builds |
-| `ACTION_RUNNER_ISOLATION` | `none` (or `systemd-run`) | Process sandboxing mode (`none`, `systemd-run`, `bubblewrap`) |
-| `ACTION_RUNNER_LOG_API_KEY` | None | Optional secret token required for log viewing (`X-Api-Key` or Bearer) |
-| `GITHUB_WEBHOOK_SECRET` | `/etc/action-runner/github_webhook_secret` | HMAC-SHA256 webhook secret token |
-| `ACTION_RUNNER_TIMEOUT_SECS` | `600` | Maximum job execution timeout (seconds) |
+| `ACTION_RUNNER_CONTROLLER_URL` | `ws://127.0.0.1:8000/api/cluster/tunnel` | WebSocket tunnel endpoint on `ActionRunner-controller` |
+| `ACTION_RUNNER_CLUSTER_TOKEN` | `/etc/action-runner/cluster_token` | Shared cluster authentication token (file path or literal; fails closed if path unreadable) |
+| `ACTION_RUNNER_NODE_ID` | Hostname | Unique worker node identifier (e.g. `node-a`, `worker-riscv64`) |
+| `ACTION_RUNNER_TAGS` | Arch-dependent defaults | Comma-separated worker capability tags (`sccache` appended automatically when `sccache` binary is detected) |
+| `ACTION_RUNNER_MAX_SLOTS` | `1` | Maximum concurrent stage slots per worker node (`1` recommended; scale intra-stage parallelism via `CARGO_BUILD_JOBS`) |
+| `ACTION_RUNNER_WORKSPACE` | `/var/lib/action-runner/workspace` | Base directory for stage workspaces and git mirrors |
+| `ACTION_RUNNER_SCCACHE_BIN` | Auto-detected | Optional explicit path to `sccache` binary, or `off`/`false`/`0`/`none` to disable `sccache` on the worker |
+| `ACTION_RUNNER_SCCACHE_ENV_FILE` | `/etc/action-runner/sccache.env` | Path to optional S3/storage environment file injected into `sccache` |
+
+---
+
+## Operator Guide: Shared `sccache` Compiler Cache Integration
+
+`action-runner` natively integrates with [`sccache`](https://github.com/mozilla/sccache) (local disk or S3-compatible object storage such as [Garage](https://garagehq.deuxfleurs.fr/), MinIO, or AWS S3) so distributed workers share compiled Rust and WebAssembly artifacts across CI runs.
+
+### 1. Install the `sccache` Binary on Each Worker Node
+
+Install `sccache` into one of the standard discovery paths probed by `WorkerConfig::detect_sccache_bin()`:
+1. `ACTION_RUNNER_SCCACHE_BIN` (if set to a valid file path; set to `off`, `false`, `0`, or `none` to disable `sccache` on a specific host)
+2. `/usr/local/bin/sccache` *(recommended system-wide location)*
+3. `/usr/bin/sccache`
+4. `$CARGO_HOME/bin/sccache` or `$HOME/.cargo/bin/sccache`
+
+```bash
+sudo install -m 755 sccache /usr/local/bin/sccache
+/usr/local/bin/sccache --version
+```
+
+When `detect_sccache_bin()` locates a valid binary at startup, the worker **automatically appends `"sccache"`** to its advertised `tags` during controller registration (`WorkerRegistration`), making the node eligible for stages configured with `sccache: mandatory`.
+
+### 2. Configure Shared S3 / Garage Credentials (`/etc/action-runner/sccache.env`)
+
+To share cache artifacts across multiple worker nodes over an S3-compatible backend (or to customize local disk cache settings), create `/etc/action-runner/sccache.env` owned by the `action-runner` service account:
+
+```bash
+sudo install -d -m 700 -o action-runner -g action-runner /etc/action-runner
+sudo tee /etc/action-runner/sccache.env >/dev/null <<'EOF'
+SCCACHE_BUCKET=sccache
+SCCACHE_REGION=us-east-1
+SCCACHE_ENDPOINT=http://192.0.2.10:3900
+SCCACHE_S3_KEY_PREFIX=v1/
+SCCACHE_IDLE_TIMEOUT=0
+AWS_ACCESS_KEY_ID=GK0123456789abcdef01234567
+AWS_SECRET_ACCESS_KEY=replace-with-your-s3-secret-key
+EOF
+sudo chown action-runner:action-runner /etc/action-runner/sccache.env
+sudo chmod 600 /etc/action-runner/sccache.env
+```
+
+`WorkerConfig::load_sccache_env()` reads `/etc/action-runner/sccache.env` (or the path in `ACTION_RUNNER_SCCACHE_ENV_FILE`) and merges any explicit environment overrides for:
+- `SCCACHE_BUCKET`, `SCCACHE_REGION`, `SCCACHE_ENDPOINT`, `SCCACHE_S3_USE_SSL`, `SCCACHE_S3_KEY_PREFIX`
+- `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, `SCCACHE_SERVER_PORT`, `SCCACHE_SERVER_UDS`, `SCCACHE_IDLE_TIMEOUT`
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+
+> **Note**: Do **not** hardcode `RUSTC_WRAPPER` inside `/etc/action-runner/sccache.env` or `/etc/action-runner/worker.env`; `StageRunner` automatically filters out `RUSTC_WRAPPER` from `sccache.env` and injects it selectively per task so incompatible tools (`cargo-miri`, `cargo-llvm-cov`) are never broken.
+
+### 3. Ensure `MuIsolation` (`security.yml`) Permits `sccache` Execution
+
+When repositories run under `MuIsolation` (`backend: Kernel` with Landlock LSM), ensure the directory containing `sccache` (`/usr/local/bin` or `/usr/bin`) is included in `exec_paths` and `/usr` in `read_paths` within `.actionrunner/security.yml`:
+
+```yaml
+default_profile: "default_ci"
+profiles:
+  default_ci:
+    backend: Kernel
+    read_paths: ["/usr", "/bin", "/lib", "/etc/ssl", "/var/lib/action-runner"]
+    write_paths: ["/var/lib/action-runner", "/tmp"]
+    exec_paths:
+      - /usr/bin
+      - /usr/local/bin
+      - /bin
+      - /var/lib/action-runner/.cargo/bin
+      - /var/lib/action-runner/.rustup
+      - /var/lib/action-runner/.local/bin
+```
+
+### 4. Runtime Behavior, Tool Filtering & Self-Healing
+
+For each dispatched task in a stage, `StageRunner` resolves the effective `SccacheMode` (`Off`, `Try` [default], or `Mandatory`) and applies the following invariants:
+
+- **Tool Eligibility Filtering**:
+  - **Eligible compiler tools** (`cargo-build`, `cargo-check`, `cargo-test`, `cargo-clippy`, `cargo-bench`, `trunk`) receive `RUSTC_WRAPPER=<sccache_bin>`, `CARGO_INCREMENTAL=0`, `SCCACHE_IDLE_TIMEOUT=0`, and all S3/cache variables from `sccache.env`.
+  - **Non-compiler & incompatible tools** (`cargo-fmt`, `cargo-audit`, `mdformat`, `cargo-llvm-cov`, `cargo-miri`) automatically have `RUSTC_WRAPPER` and `CARGO_BUILD_RUSTC_WRAPPER` removed from their process environment so Miri's own wrapper and LLVM coverage instrumentation operate cleanly.
+- **Pre-Flight Health Check & Local-Disk Hijack Recovery (`ensure_sccache_server_healthy`)**:
+  - Before spawning an eligible compiler tool, the worker runs `sccache --show-stats` under a bounded **5-second timeout** (auto-starting the local `sccache` daemon with `sccache.env` credentials if not yet running).
+  - If `SCCACHE_BUCKET` is configured but the local `sccache` daemon reports `Cache location: Local disk` (e.g., if a user previously invoked `sccache` in a shell without `sccache.env`), `StageRunner` automatically stops the stale daemon (`sccache --stop-server`) and restarts it with the S3 environment.
+  - If the daemon is transiently wedged, `StageRunner` executes a single `--stop-server` + `--show-stats` recovery cycle.
+- **Failure Policy (`Try` vs. `Mandatory`)**:
+  - **`SccacheMode::Try` (default)**: If `sccache` is not installed or fails the health check (e.g. temporary S3 outage), the worker logs a warning, strips `RUSTC_WRAPPER`, and **falls back cleanly to uncached `rustc` compilation** so CI pipelines remain operational.
+  - **`SccacheMode::Mandatory`**: If `sccache` is missing or fails the health check after retry, the stage **fails closed immediately (`exit_code = 126`)** with a diagnostic error.
+
+### 5. Verifying Worker `sccache` Status
+
+Run the following command under the `action-runner` service account to verify S3 connectivity and cache hit rates on a worker node:
+
+```bash
+sudo -u action-runner bash -c 'set -a && source /etc/action-runner/sccache.env && set +a && /usr/local/bin/sccache --show-stats'
+```
 
 ---
 
