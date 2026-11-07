@@ -112,35 +112,85 @@ Environment variables configured in `/etc/action-runner/worker.env` (loaded by `
 
 `action-runner` natively integrates with [`sccache`](https://github.com/mozilla/sccache) (local disk or S3-compatible object storage such as [Garage](https://garagehq.deuxfleurs.fr/), MinIO, or AWS S3) so distributed workers share compiled Rust and WebAssembly artifacts across CI runs.
 
+> **Complete Operator & Workflow Portal Guide**: See [**Operator & Workflow Guide: Distributed `sccache` Compilation Caching**](https://github.com/LMA1980/lma1980.github.io/blob/main/content/docs/sccache-guide.md) for the full architectural and operator walkthrough.
+
+### 0. How Enabling `sccache` Influences Your Experience (What to Expect)
+
+1. **Default-On `try` Mode (`SccacheMode::Try`)**:
+   - In ActionRunner, `sccache` defaults to **`try`** across all workflows, stages, and tasks (`tasks.<id>.sccache -> stages[i].sccache -> workflow.sccache -> try`).
+   - **Before `sccache` is installed on a worker**: `try` mode sees no `sccache` binary and transparently runs standard uncached `cargo` builds with zero errors.
+   - **The moment you install `/usr/local/bin/sccache` and restart `action-runner-worker`**: The worker advertises `"sccache"` in its capability `tags` and **automatically begins caching all eligible compilation tasks across existing and new repositories**—without requiring you to edit every `.actionrunner/ActionRunner.yml` file. (To opt out on a worker, set `ACTION_RUNNER_SCCACHE_BIN=off` in `/etc/action-runner/worker.env`; to opt out in a workflow/stage/task, set `sccache: false`.)
+2. **Cold Cache (Build #1) vs. Warm Cache (Build #2+)**:
+   - **Build #1 (Cold Cache — 5% to 10% Slower)**: The first run after installing `sccache` (or after a `rustup update` / `Cargo.lock` bump) compiles every crate from scratch, hashes inputs, and uploads `.rlib`/`.rmeta` artifacts to the cache backend. Expect Build #1 to take slightly longer than an uncached build.
+   - **Build #2+ (Warm Cache — 60% to 85% Faster)**: Subsequent pushes and pull requests fetch unchanged crates directly from `sccache`, cutting `cargo-check`, `cargo-clippy`, `cargo-test`, and `cargo-build` times dramatically.
+3. **Why `CARGO_INCREMENTAL=0` Is Automatically Enforced**:
+   - `sccache` cannot cache Rust's local incremental compilation state (`-C incremental=...`). Whenever `StageRunner` activates `sccache` for a task, it automatically sets `CARGO_INCREMENTAL=0`. Each crate is cached once as a hermetic unit and reused across all branches and worker nodes, while `target/*/incremental/` disk bloat is eliminated.
+4. **Cross-Compilation Challenges & What Shares Cache Hits Across Nodes (`x86_64` ↔ `riscv64` / `aarch64`)**:
+   - **Why `x86_64` Cross-Compilers Share Cache Hits With Each Other, But *Not* With Native `riscv64` Workers**: `sccache` hashes the **SHA-256 digest of the host `rustc` binary itself** along with `--target` and flags. Multiple `x86_64` workers cross-compiling for `riscv64gc-unknown-linux-gnu` share 100% of their cache hits in S3, while native `riscv64` workers maintain a separate hash space (all architectures safely share the same `SCCACHE_BUCKET` without collisions).
+   - **Target-Scoped `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` vs. Global `RUSTFLAGS`**: Setting global `RUSTFLAGS="-C target-cpu=spacemit-x100"` during an `x86_64 -> riscv64` cross-build breaks host `x86_64` `build.rs` scripts and proc-macros. `StageRunner::compute_toolchain_env` automatically scopes flags to `CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUSTFLAGS` (and passes `-C link-arg=--target=riscv64-linux-gnu -C link-arg=--sysroot=/ -C link-arg=-fuse-ld=lld` for `llvm-24` or `riscv64-unknown-linux-gnu-gcc` for `gcc-17`) while leaving host `RUSTFLAGS` clean so `sccache` caches both host proc-macros and target crates.
+   - **Toolchain & Path Alignment**: All workers sharing cross-compile or native caches must use identical `rustc` versions (`/var/lib/action-runner/.rustup`), identical symlink paths (`/opt/cross-llvm-24` -> `/opt/llvm-24-spacemit-x100`, `/opt/cross-gcc-17` -> `/opt/gcc-17-spacemit-x100` with verified `bin/clang` and `bin/riscv64-unknown-linux-gnu-gcc` binaries), and identical `ACTION_RUNNER_WORKSPACE` paths (`/var/lib/action-runner/workspace`).
+   - **Cross-Compiling `sccache` for Low-RAM (`4 GiB`) Edge Workers**: Avoid running `cargo install sccache` directly on `4 GiB` RAM SBCs (which can OOM or wear out flash/overlayroot storage); instead, cross-compile `sccache` on an `x86_64` host and install the stripped binary to `/usr/local/bin/sccache`.
+
 ### 1. Install the `sccache` Binary on Each Worker Node
 
-Install `sccache` into one of the standard discovery paths probed by `WorkerConfig::detect_sccache_bin()`:
-1. `ACTION_RUNNER_SCCACHE_BIN` (if set to a valid file path; set to `off`, `false`, `0`, or `none` to disable `sccache` on a specific host)
+> **Critical Service Account Rule**: Never install `sccache` only inside `/root/.cargo/bin` or a personal `/home/<user>/.cargo/bin` directory (`ProtectHome=read-only` and `MuIsolation` Landlock rules block access). Always install to **`/usr/local/bin/sccache`** (`0755 root:root`).
+
+`WorkerConfig::detect_sccache_bin()` probes:
+1. `ACTION_RUNNER_SCCACHE_BIN` (explicit path, or `off`/`false`/`0`/`none` to disable `sccache` on that worker)
 2. `/usr/local/bin/sccache` *(recommended system-wide location)*
 3. `/usr/bin/sccache`
 4. `$CARGO_HOME/bin/sccache` or `$HOME/.cargo/bin/sccache`
 
+#### Option A: `x86_64` or `aarch64` Linux Worker (Official Static Binary)
+
 ```bash
-sudo install -m 755 sccache /usr/local/bin/sccache
-/usr/local/bin/sccache --version
+SCCACHE_VERSION="v0.8.2"
+ARCH="$(uname -m)" # x86_64 or aarch64
+curl -fL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" -o /tmp/sccache.tar.gz
+tar -xzf /tmp/sccache.tar.gz -C /tmp
+sudo install -m 755 "/tmp/sccache-${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl/sccache" /usr/local/bin/sccache
+rm -rf /tmp/sccache.tar.gz "/tmp/sccache-${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl"
+sudo -u action-runner /usr/local/bin/sccache --version
+```
+
+#### Option B: `riscv64` (SpacemiT K3) or Custom Linux Worker (Build from Source)
+
+```bash
+sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev build-essential
+sudo -u action-runner env \
+  RUSTUP_HOME=/var/lib/action-runner/.rustup \
+  CARGO_HOME=/var/lib/action-runner/.cargo \
+  PATH="/var/lib/action-runner/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
+  cargo install sccache --locked
+sudo install -m 755 /var/lib/action-runner/.cargo/bin/sccache /usr/local/bin/sccache
+sudo -u action-runner /usr/local/bin/sccache --version
 ```
 
 When `detect_sccache_bin()` locates a valid binary at startup, the worker **automatically appends `"sccache"`** to its advertised `tags` during controller registration (`WorkerRegistration`), making the node eligible for stages configured with `sccache: mandatory`.
 
-### 2. Configure Shared S3 / Garage Credentials (`/etc/action-runner/sccache.env`)
+### 2. Choose and Configure Your Cache Backend (`/etc/action-runner/sccache.env`)
 
-To share cache artifacts across multiple worker nodes over an S3-compatible backend (or to customize local disk cache settings), create `/etc/action-runner/sccache.env` owned by the `action-runner` service account:
+Create `/etc/action-runner/sccache.env` owned by the `action-runner` service account (`0700` on `/etc/action-runner` owned by `action-runner:action-runner`, **not** `root:root`):
 
 ```bash
 sudo install -d -m 700 -o action-runner -g action-runner /etc/action-runner
 sudo tee /etc/action-runner/sccache.env >/dev/null <<'EOF'
+# Backend Option A: Shared S3 / Garage / MinIO Cache (multi-node cluster)
 SCCACHE_BUCKET=sccache
 SCCACHE_REGION=us-east-1
 SCCACHE_ENDPOINT=http://192.0.2.10:3900
+SCCACHE_S3_USE_SSL=false
 SCCACHE_S3_KEY_PREFIX=v1/
+SCCACHE_SERVER_PORT=4226
 SCCACHE_IDLE_TIMEOUT=0
 AWS_ACCESS_KEY_ID=GK0123456789abcdef01234567
 AWS_SECRET_ACCESS_KEY=replace-with-your-s3-secret-key
+
+# Backend Option B: Per-Node Local Disk Cache (if not using S3, comment out Option A and uncomment below)
+# SCCACHE_DIR=/var/lib/action-runner/.cache/sccache
+# SCCACHE_CACHE_SIZE=20G
+# SCCACHE_SERVER_PORT=4226
+# SCCACHE_IDLE_TIMEOUT=0
 EOF
 sudo chown action-runner:action-runner /etc/action-runner/sccache.env
 sudo chmod 600 /etc/action-runner/sccache.env
