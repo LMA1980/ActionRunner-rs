@@ -1,18 +1,18 @@
-name = "action-runner"
-# Crate-embedded Symposium manifest for action-runner.
+name = "mu-ci-worker"
+# Crate-embedded Symposium manifest for mu-ci-worker.
 
 [[plugins]]
-depends-on = ["action-runner-ipc"]
-source.cargo = "action-runner-ipc"
+depends-on = ["mu-ci-ipc"]
+source.cargo = "mu-ci-ipc"
 
 [[plugins]]
-depends-on = ["action-runner-tools"]
-source.cargo = "action-runner-tools"
+depends-on = ["mu-ci-tools"]
+source.cargo = "mu-ci-tools"
 
 [[plugins]]
-depends-on = ["mu-isolation"]
-source.cargo = "mu-isolation"
+depends-on = ["mu-ci-isolation"]
+source.cargo = "mu-ci-isolation"
 
 [[plugins]]
-depends-on = ["muobserve-ipc"]
-source.cargo = "muobserve-ipc"
+depends-on = ["mu-observable-ipc"]
+source.cargo = "mu-observable-ipc"

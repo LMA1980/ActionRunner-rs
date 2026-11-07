@@ -1,8 +1,8 @@
-use action_runner::config::{is_safe_repo_name, IsolationMode, WorkerConfig};
-use action_runner::stage_runner::{
+use mu_ci_ipc::{SandboxConstraintSpec, StageDispatchTask, TypedTaskInvocation};
+use mu_ci_worker::config::{is_safe_repo_name, IsolationMode, WorkerConfig};
+use mu_ci_worker::stage_runner::{
     is_safe_identifier, sanitize_path_segment, validate_and_resolve_working_dir, StageRunner,
 };
-use action_runner_ipc::{SandboxConstraintSpec, StageDispatchTask, TypedTaskInvocation};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

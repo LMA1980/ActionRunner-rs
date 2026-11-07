@@ -1,5 +1,5 @@
-use action_runner::config::{IsolationMode, WorkerConfig};
-use action_runner::worker::WorkerAgent;
+use mu_ci_worker::config::{IsolationMode, WorkerConfig};
+use mu_ci_worker::worker::WorkerAgent;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -568,13 +568,13 @@ async fn test_challenge_6_multiple_queued_exclusive_tasks_serialize() {
 /// dispatch concurrent shared tasks and an exclusive task, and verify gating on the wire.
 #[tokio::test]
 async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
-    use action_runner_ipc::{
+    use futures_util::{SinkExt, StreamExt};
+    use mu_ci_ipc::{
         create_fory_runtime, IpcHeader, SandboxConstraintSpec, StageDispatchTask,
         TypedTaskInvocation, WorkerRegistration, MSG_TYPE_STAGE_COMPLETION,
         MSG_TYPE_STAGE_DISPATCH, MSG_TYPE_STAGE_STARTED, MSG_TYPE_WORKER_HEARTBEAT,
         MSG_TYPE_WORKER_REGISTRATION,
     };
-    use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::Message;
 

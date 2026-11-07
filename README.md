@@ -1,23 +1,23 @@
-# ActionRunner-rs
+# mu-ci-worker
 
 <p align="center">
-  <a href="https://hook.lma1980.duckdns.org/cards/LMA1980/ActionRunner-rs/card.svg">
-    <img src="https://hook.lma1980.duckdns.org/cards/LMA1980/ActionRunner-rs/card.svg" alt="ActionRunner-rs CI Factory Scorecard" width="520"/>
+  <a href="https://hook.lma1980.duckdns.org/cards/LMA1980/mu-ci-worker/card.svg">
+    <img src="https://hook.lma1980.duckdns.org/cards/LMA1980/mu-ci-worker/card.svg" alt="mu-ci-worker CI Factory Scorecard" width="520"/>
   </a>
 </p>
 
 <p align="center">
-  <a href="https://hook.lma1980.duckdns.org/badges/LMA1980/ActionRunner-rs/status.svg"><img src="https://hook.lma1980.duckdns.org/badges/LMA1980/ActionRunner-rs/status.svg" alt="CI Status"/></a>
-  <a href="https://hook.lma1980.duckdns.org/badges/LMA1980/ActionRunner-rs/score.svg"><img src="https://hook.lma1980.duckdns.org/badges/LMA1980/ActionRunner-rs/score.svg" alt="Quality Score"/></a>
-  <a href="https://hook.lma1980.duckdns.org/badges/LMA1980/ActionRunner-rs/coverage.svg"><img src="https://hook.lma1980.duckdns.org/badges/LMA1980/ActionRunner-rs/coverage.svg" alt="Coverage"/></a>
-  <a href="https://hook.lma1980.duckdns.org/badges/LMA1980/ActionRunner-rs/benchmark.svg"><img src="https://hook.lma1980.duckdns.org/badges/LMA1980/ActionRunner-rs/benchmark.svg" alt="Benchmark"/></a>
+  <a href="https://hook.lma1980.duckdns.org/badges/LMA1980/mu-ci-worker/status.svg"><img src="https://hook.lma1980.duckdns.org/badges/LMA1980/mu-ci-worker/status.svg" alt="CI Status"/></a>
+  <a href="https://hook.lma1980.duckdns.org/badges/LMA1980/mu-ci-worker/score.svg"><img src="https://hook.lma1980.duckdns.org/badges/LMA1980/mu-ci-worker/score.svg" alt="Quality Score"/></a>
+  <a href="https://hook.lma1980.duckdns.org/badges/LMA1980/mu-ci-worker/coverage.svg"><img src="https://hook.lma1980.duckdns.org/badges/LMA1980/mu-ci-worker/coverage.svg" alt="Coverage"/></a>
+  <a href="https://hook.lma1980.duckdns.org/badges/LMA1980/mu-ci-worker/benchmark.svg"><img src="https://hook.lma1980.duckdns.org/badges/LMA1980/mu-ci-worker/benchmark.svg" alt="Benchmark"/></a>
 </p>
 
 ---
 
 Lightweight, high-performance GitHub Webhook & CI execution sidecar daemon written in Rust for native **SpacemiT Key Stone K3** (8× X100 RISC-V @ 1.6GHz) hardware.
 
-`ActionRunner-rs` **eats its own dog food** — whenever code is pushed to this repository, the sidecar clones or syncs the local workspace, compiles natively, runs formatting/clippy/audit/coverage, computes its quality score, and updates its own badges and scorecard in real time.
+`mu-ci-worker` **eats its own dog food** — whenever code is pushed to this repository, the sidecar clones or syncs the local workspace, compiles natively, runs formatting/clippy/audit/coverage, computes its quality score, and updates its own badges and scorecard in real time.
 
 ---
 
@@ -73,7 +73,7 @@ Workflows are defined in YAML and triggered based on GitHub webhook events:
 
 ## Security Model & Sandboxing
 
-`ActionRunner-rs` implements strict multi-layer defense against rogue code execution on public endpoints:
+`mu-ci-worker` implements strict multi-layer defense against rogue code execution on public endpoints:
 
 1. **Service Account Isolation**: Runs under a dedicated, unprivileged system account (`action-runner`). User `lma1980` can sudo as `action-runner` for diagnostics (`sudo -u action-runner -i`).
 2. **Anti-RCE Pull Request Guards**:

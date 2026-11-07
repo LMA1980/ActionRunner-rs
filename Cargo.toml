@@ -1,16 +1,16 @@
 [package]
-name = "action-runner"
+name = "mu-ci-worker"
 version = "0.2.0"
 edition = "2021"
 description = "Lightweight zero-copy distributed CI execution worker agent for ActionRunner"
 license = "AGPL-3.0-only"
-repository = "https://github.com/LMA1980/ActionRunner-rs"
+repository = "https://github.com/LMA1980/mu-ci-worker"
 
 [dependencies]
-action-runner-ipc = { git = "https://github.com/LMA1980/ActionRunner-ipc.git", branch = "main" }
-action-runner-tools = { git = "https://github.com/LMA1980/ActionRunner-tools.git", branch = "main" }
-mu-isolation = { git = "https://github.com/LMA1980/MuIsolation.git", branch = "main" }
-muobserve-ipc = { git = "https://github.com/LMA1980/MuObserve-ipc.git", branch = "main" }
+mu-ci-ipc = { git = "https://github.com/LMA1980/mu-ci-ipc.git", branch = "feat/m8-naming-alignment" }
+mu-ci-tools = { git = "https://github.com/LMA1980/mu-ci-tools.git", branch = "feat/m8-naming-alignment" }
+mu-ci-isolation = { git = "https://github.com/LMA1980/mu-ci-isolation.git", branch = "feat/m8-naming-alignment" }
+mu-observable-ipc = { git = "https://github.com/LMA1980/mu-observable-ipc.git", branch = "feat/m8-naming-alignment" }
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "sync", "time", "fs", "io-util", "signal", "net"] }
 tokio-tungstenite = "0.26"

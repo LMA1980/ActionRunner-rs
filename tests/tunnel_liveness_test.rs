@@ -1,7 +1,7 @@
-use action_runner::config::{IsolationMode, WorkerConfig};
-use action_runner::worker::WorkerAgent;
-use action_runner_ipc::{IpcHeader, MSG_TYPE_WORKER_REGISTRATION};
 use futures_util::{SinkExt, StreamExt};
+use mu_ci_ipc::{IpcHeader, MSG_TYPE_WORKER_REGISTRATION};
+use mu_ci_worker::config::{IsolationMode, WorkerConfig};
+use mu_ci_worker::worker::WorkerAgent;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
