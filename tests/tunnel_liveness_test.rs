@@ -311,7 +311,9 @@ async fn test_scenario_b_coordinator_probe_ping_replied_with_pong() {
 async fn test_scenario_c_outbound_write_timeout_on_stalled_socket() {
     let _lock = ENV_LOCK.lock().await;
     let prev_write = std::env::var("ACTION_RUNNER_WRITE_TIMEOUT_SECS").ok();
+    let prev_mu_write = std::env::var("MU_CI_WRITE_TIMEOUT_SECS").ok();
     std::env::set_var("ACTION_RUNNER_WRITE_TIMEOUT_SECS", "2");
+    std::env::set_var("MU_CI_WRITE_TIMEOUT_SECS", "2");
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -320,7 +322,8 @@ async fn test_scenario_c_outbound_write_timeout_on_stalled_socket() {
     let (mut config, _temp_ws) = make_test_config(ws_url, "worker-write-timeout");
     // Ensure outbound registration frame exceeds the loopback TCP socket buffer
     // so ws_sender.send blocks and times out within ACTION_RUNNER_WRITE_TIMEOUT_SECS.
-    config.tags = vec!["x".repeat(3_000_000)];
+    // 10 MB reliably exceeds Linux max tcp_wmem ceiling (typically ~4 MB).
+    config.tags = vec!["x".repeat(10_000_000)];
     let worker = WorkerAgent::new(config);
     let (_shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -347,7 +350,7 @@ async fn test_scenario_c_outbound_write_timeout_on_stalled_socket() {
         let _ws = tokio_tungstenite::accept_async(stream).await.unwrap();
 
         // Freeze and stop reading from the TCP stream so write blocks
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
     });
 
     let start = Instant::now();
@@ -357,6 +360,10 @@ async fn test_scenario_c_outbound_write_timeout_on_stalled_socket() {
     match prev_write {
         Some(v) => std::env::set_var("ACTION_RUNNER_WRITE_TIMEOUT_SECS", v),
         None => std::env::remove_var("ACTION_RUNNER_WRITE_TIMEOUT_SECS"),
+    }
+    match prev_mu_write {
+        Some(v) => std::env::set_var("MU_CI_WRITE_TIMEOUT_SECS", v),
+        None => std::env::remove_var("MU_CI_WRITE_TIMEOUT_SECS"),
     }
 
     assert!(
