@@ -305,7 +305,8 @@ impl WorkerAgent {
         let mut reg_frame = Vec::with_capacity(mu_ci_ipc::HEADER_SIZE + reg_payload.len());
         reg_frame.extend_from_slice(zerocopy::IntoBytes::as_bytes(&reg_hdr));
         reg_frame.extend_from_slice(&reg_payload);
-        let write_timeout = std::env::var("ACTION_RUNNER_WRITE_TIMEOUT_SECS")
+        let write_timeout = std::env::var("MU_CI_WRITE_TIMEOUT_SECS")
+            .or_else(|_| std::env::var("ACTION_RUNNER_WRITE_TIMEOUT_SECS"))
             .ok()
             .and_then(|s| s.parse().ok())
             .map(Duration::from_secs)
@@ -332,7 +333,8 @@ impl WorkerAgent {
         let hb_tx = outbound_tx.clone();
         let hb_fory = create_fory_runtime()?;
 
-        let ping_interval = std::env::var("ACTION_RUNNER_PING_INTERVAL_SECS")
+        let ping_interval = std::env::var("MU_CI_PING_INTERVAL_SECS")
+            .or_else(|_| std::env::var("ACTION_RUNNER_PING_INTERVAL_SECS"))
             .ok()
             .and_then(|s| s.parse().ok())
             .map(Duration::from_secs)
@@ -375,7 +377,8 @@ impl WorkerAgent {
         });
 
         let stage_runner = Arc::new(StageRunner::new(self.config.clone()));
-        let liveness_timeout = std::env::var("ACTION_RUNNER_LIVENESS_TIMEOUT_SECS")
+        let liveness_timeout = std::env::var("MU_CI_LIVENESS_TIMEOUT_SECS")
+            .or_else(|_| std::env::var("ACTION_RUNNER_LIVENESS_TIMEOUT_SECS"))
             .ok()
             .and_then(|s| s.parse().ok())
             .map(Duration::from_secs)
