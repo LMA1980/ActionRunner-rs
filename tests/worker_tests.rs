@@ -477,7 +477,7 @@ async fn test_stage_runner_streams_spans_and_correlated_logs_to_muobserve_collec
 
     let emitter = TelemetryEmitter::new(collector_addr).with_timeout(Duration::from_secs(2));
     let runner = StageRunner::new(config).with_telemetry_emitter(emitter);
-    let (log_tx, _log_rx) = mpsc::channel(32);
+    let (log_tx, mut log_rx) = mpsc::channel(32);
 
     let parent_tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
     let task = StageDispatchTask {
@@ -526,13 +526,20 @@ async fn test_stage_runner_streams_spans_and_correlated_logs_to_muobserve_collec
         .contains("\"cpu_cluster\":\"A100\""));
     assert!(spans[0].attributes_json.contains("\"vlen_bits\":1024"));
 
-    assert!(!logs.is_empty());
-    for log in &logs {
-        assert_eq!(log.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
-        assert_eq!(log.span_id, spans[0].span_id);
-        assert_eq!(log.job_id.as_deref(), Some("job-otel-1"));
-        assert_eq!(log.stage_id.as_deref(), Some("stage-otel-1"));
+    // Stage completion must NOT re-emit all stage logs a second time over emit_stage_bundle.
+    assert!(logs.is_empty());
+
+    // Instead, log lines are streamed once in real time over log_tx.
+    let mut streamed_logs = Vec::new();
+    while let Ok(batch_bytes) = log_rx.try_recv() {
+        let entries = decode_log_batch(&batch_bytes).expect("decode log batch");
+        for entry in entries {
+            assert!(!entry.content.contains('\n') && !entry.content.contains('\r'));
+            streamed_logs.push(entry);
+        }
     }
+    assert!(!streamed_logs.is_empty());
+    assert!(streamed_logs.iter().any(|l| l.line_no >= 1));
 }
 
 #[test]

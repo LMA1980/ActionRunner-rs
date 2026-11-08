@@ -347,42 +347,66 @@ impl StageTraceSession {
     }
 
     /// Converts worker [`LogEntry`] records into structured [`OtelLogEntry`] records correlated
-    /// with this stage's `trace_id` and `span_id`.
+    /// with this stage's `trace_id` and `span_id`, splitting any multi-line `content` into
+    /// single-line [`OtelLogEntry`] records with deterministic `line_no` and `stream` metadata.
     #[must_use]
     pub fn correlate_logs(&self, entries: &[LogEntry]) -> Vec<OtelLogEntry> {
         let redactor = DeterministicSecretRedactor::new();
         let trace_id = self.trace_id_hex();
         let span_id = self.span_id_hex();
+        let mut out = Vec::with_capacity(entries.len());
+        let mut next_line_no = 1u32;
 
-        entries
-            .iter()
-            .map(|e| {
-                let (severity_number, severity_text, stream_label) = if e.stream == 2 {
-                    (13, "WARN".to_string(), "stderr")
+        for e in entries {
+            let (severity_number, severity_text, stream_label) = if e.stream == 2 {
+                (13, "WARN", "stderr")
+            } else {
+                (9, "INFO", "stdout")
+            };
+            let split_lines: Vec<&str> = if e.content.is_empty() {
+                vec![""]
+            } else {
+                e.content.lines().collect()
+            };
+            let start_line_no = if e.line_no > 0 {
+                e.line_no.max(next_line_no)
+            } else if split_lines.len() > 1 {
+                next_line_no.max(1)
+            } else {
+                0
+            };
+
+            for (idx, line) in split_lines.into_iter().enumerate() {
+                let line_no = if start_line_no == 0 {
+                    0
                 } else {
-                    (9, "INFO".to_string(), "stdout")
+                    let current = start_line_no.saturating_add(u32::try_from(idx).unwrap_or(0));
+                    next_line_no = current.saturating_add(1);
+                    current
                 };
                 let attrs = serde_json::json!({
                     "stream": stream_label,
-                    "line_no": e.line_no,
+                    "line_no": line_no,
                 });
                 let mut log = OtelLogEntry {
                     timestamp_unix_nano: e.timestamp_us.saturating_mul(1_000),
                     trace_id: trace_id.clone(),
                     span_id: span_id.clone(),
                     severity_number,
-                    severity_text,
+                    severity_text: severity_text.to_string(),
                     service_name: "action-runner-worker".to_string(),
                     node_id: e.node_id.clone(),
-                    body: e.content.clone(),
+                    body: line.to_string(),
                     attributes_json: attrs.to_string(),
                     job_id: Some(e.job_id.clone()),
                     stage_id: Some(e.stage_id.clone()),
                 };
                 log.redact_in_place(&redactor);
-                log
-            })
-            .collect()
+                out.push(log);
+            }
+        }
+
+        out
     }
 }
 
@@ -899,6 +923,57 @@ mod tests {
         assert!(correlated_logs[0].body.contains("[REDACTED:MUOBSERVE]"));
         assert_eq!(correlated_logs[0].severity_text, "INFO");
         assert_eq!(correlated_logs[1].severity_text, "WARN");
+    }
+
+    #[test]
+    fn test_correlate_logs_splits_multiline_content_into_single_line_records() {
+        let cfg = sample_worker_config("riscv64", &["riscv64", "k3"]);
+        let task = sample_dispatch_task(
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+            false,
+        );
+        let hw = HardwareProfile::detect(&cfg, &task, None);
+        let session = StageTraceSession::from_dispatch_task(&task, &cfg.node_id, &hw);
+
+        let raw_logs = vec![
+            LogEntry {
+                timestamp_us: 1_700_000_000_000_000,
+                job_id: task.job_id.clone(),
+                stage_id: task.stage_id.clone(),
+                node_id: cfg.node_id.clone(),
+                stream: 1,
+                line_no: 1,
+                content: "first stdout line\nsecond stdout line\r\nthird stdout line\n".to_string(),
+            },
+            LogEntry {
+                timestamp_us: 1_700_000_000_001_000,
+                job_id: task.job_id.clone(),
+                stage_id: task.stage_id.clone(),
+                node_id: cfg.node_id.clone(),
+                stream: 2,
+                line_no: 2,
+                content: "stderr warning line 1\nstderr warning line 2".to_string(),
+            },
+        ];
+
+        let correlated = session.correlate_logs(&raw_logs);
+        assert_eq!(correlated.len(), 5);
+
+        assert_eq!(correlated[0].body, "first stdout line");
+        assert_eq!(correlated[1].body, "second stdout line");
+        assert_eq!(correlated[2].body, "third stdout line");
+        assert_eq!(correlated[3].body, "stderr warning line 1");
+        assert_eq!(correlated[4].body, "stderr warning line 2");
+
+        for (idx, log) in correlated.iter().enumerate() {
+            assert!(!log.body.contains('\n') && !log.body.contains('\r'));
+            let attrs: serde_json::Value =
+                serde_json::from_str(&log.attributes_json).expect("valid attributes_json");
+            let expected_line_no = u64::try_from(idx + 1).unwrap();
+            assert_eq!(attrs["line_no"].as_u64(), Some(expected_line_no));
+            let expected_stream = if idx < 3 { "stdout" } else { "stderr" };
+            assert_eq!(attrs["stream"].as_str(), Some(expected_stream));
+        }
     }
 
     #[test]
