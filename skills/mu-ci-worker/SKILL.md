@@ -28,3 +28,8 @@ Use these invariants when developing or deploying the `mu-ci-worker` worker agen
   - Only eligible compiler tools (`cargo-build`, `cargo-check`, `cargo-test`, `cargo-clippy`, `cargo-bench`, `trunk`) receive `RUSTC_WRAPPER=<sccache_bin>`, `CARGO_INCREMENTAL=0`, and `SCCACHE_IDLE_TIMEOUT=0`.
   - Incompatible/non-compiler tools (`cargo-fmt`, `cargo-audit`, `mdformat`, `cargo-llvm-cov`, `cargo-miri`) have `RUSTC_WRAPPER` stripped.
   - `StageRunner::ensure_sccache_server_healthy` enforces a 5s bounded `--show-stats` check, automatically restarts the local daemon if it was running in `Local disk` mode despite `SCCACHE_BUCKET` configuration, falls back to uncached compilation in `SccacheMode::Try`, and fails closed (`exit 126`) in `SccacheMode::Mandatory`.
+
+## 4. Single-Pass Real-Time Line Streaming (`specs/single-pass-line-streaming.md`)
+
+- `StageRunner::run_v3_typed_tasks` streams stdout/stderr lines once in real-time 16-line `MSG_TYPE_ARROW_LOG` batches over `log_tx` to `mu-ci-controller` without accumulating `all_stage_logs` in memory or re-sending stage logs in `emit_stage_bundle`.
+- `StageTraceSession::correlate_logs` splits any multi-line `LogEntry.content` into single-line `OtelLogEntry` records with monotonically increasing `"line_no"` and `"stream"` metadata in `attributes_json`.

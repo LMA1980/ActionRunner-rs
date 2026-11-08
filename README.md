@@ -30,6 +30,7 @@ Lightweight, high-performance GitHub Webhook & CI execution sidecar daemon writt
 - **Factory Pipeline Quality Scoring**: Evaluates tests pass-ratio, line coverage (`cargo llvm-cov`), security advisories (`cargo audit`), and linter hygiene (`cargo clippy`) to calculate an overall quality score (0–100) and letter grade (`A+` to `F`).
 - **Individual Submodule Scoring & Badges**: Automatically discovers Git submodules from `.gitmodules`, tracks individual test counts, coverage, benchmarks, and hygiene, and generates dedicated badges and multi-row scorecard pill rows.
 - **High-DPI SVG Badges & Scorecards**: Dynamic badges (`score.svg`, `status.svg`, `coverage.svg`, `benchmark.svg`) and rich multi-metric cards (`card.svg`) rendered on-the-fly.
+- **Single-Pass Line Streaming**: Streams stdout/stderr lines once in real-time 16-line `MSG_TYPE_ARROW_LOG` batches over the controller tunnel without retaining full-stage `Vec<LogEntry>` copies in memory or duplicating stage logs at stage completion. See [`specs/single-pass-line-streaming.md`](specs/single-pass-line-streaming.md).
 - **Ultra-Low Resource Footprint**: Consumes < 15 MB RAM under idle operation.
 
 ---
