@@ -546,7 +546,6 @@ impl StageRunner {
         let registry = build_worker_tool_registry();
         let line_counter = Arc::new(AtomicU32::new(1));
         let mut last_pid = 0u32;
-        let mut all_stage_logs: Vec<LogEntry> = Vec::new();
         let mut all_test_runs: Vec<TestCaseRunEntry> = Vec::new();
         let mut all_bench_runs: Vec<BenchmarkRunEntry> = Vec::new();
 
@@ -571,13 +570,12 @@ impl StageRunner {
                     e.to_string(),
                     None,
                 );
-                let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                 if let Some(span) = &res.child_span {
                     let _ = self
                         .telemetry_emitter
                         .emit_stage_bundle(
                             std::slice::from_ref(span),
-                            &otel_logs,
+                            &[],
                             &all_test_runs,
                             &all_bench_runs,
                         )
@@ -603,13 +601,12 @@ impl StageRunner {
                         err.to_string(),
                         None,
                     );
-                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                     if let Some(span) = &res.child_span {
                         let _ = self
                             .telemetry_emitter
                             .emit_stage_bundle(
                                 std::slice::from_ref(span),
-                                &otel_logs,
+                                &[],
                                 &all_test_runs,
                                 &all_bench_runs,
                             )
@@ -635,13 +632,12 @@ impl StageRunner {
                         err_msg,
                         None,
                     );
-                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                     if let Some(span) = &res.child_span {
                         let _ = self
                             .telemetry_emitter
                             .emit_stage_bundle(
                                 std::slice::from_ref(span),
-                                &otel_logs,
+                                &[],
                                 &all_test_runs,
                                 &all_bench_runs,
                             )
@@ -676,13 +672,12 @@ impl StageRunner {
                     err_msg,
                     None,
                 );
-                let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                 if let Some(span) = &res.child_span {
                     let _ = self
                         .telemetry_emitter
                         .emit_stage_bundle(
                             std::slice::from_ref(span),
-                            &otel_logs,
+                            &[],
                             &all_test_runs,
                             &all_bench_runs,
                         )
@@ -709,13 +704,12 @@ impl StageRunner {
                         err_msg,
                         None,
                     );
-                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                     if let Some(span) = &res.child_span {
                         let _ = self
                             .telemetry_emitter
                             .emit_stage_bundle(
                                 std::slice::from_ref(span),
-                                &otel_logs,
+                                &[],
                                 &all_test_runs,
                                 &all_bench_runs,
                             )
@@ -743,13 +737,12 @@ impl StageRunner {
                     e.to_string(),
                     None,
                 );
-                let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                 if let Some(span) = &res.child_span {
                     let _ = self
                         .telemetry_emitter
                         .emit_stage_bundle(
                             std::slice::from_ref(span),
-                            &otel_logs,
+                            &[],
                             &all_test_runs,
                             &all_bench_runs,
                         )
@@ -779,13 +772,12 @@ impl StageRunner {
                         msg,
                         Some(denied),
                     );
-                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                     if let Some(span) = &res.child_span {
                         let _ = self
                             .telemetry_emitter
                             .emit_stage_bundle(
                                 std::slice::from_ref(span),
-                                &otel_logs,
+                                &[],
                                 &all_test_runs,
                                 &all_bench_runs,
                             )
@@ -809,13 +801,12 @@ impl StageRunner {
                         msg,
                         Some(denied),
                     );
-                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                     if let Some(span) = &res.child_span {
                         let _ = self
                             .telemetry_emitter
                             .emit_stage_bundle(
                                 std::slice::from_ref(span),
-                                &otel_logs,
+                                &[],
                                 &all_test_runs,
                                 &all_bench_runs,
                             )
@@ -856,13 +847,12 @@ impl StageRunner {
                         e,
                         None,
                     );
-                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                     if let Some(span) = &res.child_span {
                         let _ = self
                             .telemetry_emitter
                             .emit_stage_bundle(
                                 std::slice::from_ref(span),
-                                &otel_logs,
+                                &[],
                                 &all_test_runs,
                                 &all_bench_runs,
                             )
@@ -918,13 +908,12 @@ impl StageRunner {
                     sccache_err,
                     None,
                 );
-                let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                 if let Some(span) = &res.child_span {
                     let _ = self
                         .telemetry_emitter
                         .emit_stage_bundle(
                             std::slice::from_ref(span),
-                            &otel_logs,
+                            &[],
                             &all_test_runs,
                             &all_bench_runs,
                         )
@@ -955,13 +944,12 @@ impl StageRunner {
                         err_msg,
                         None,
                     );
-                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                     if let Some(span) = &res.child_span {
                         let _ = self
                             .telemetry_emitter
                             .emit_stage_bundle(
                                 std::slice::from_ref(span),
-                                &otel_logs,
+                                &[],
                                 &all_test_runs,
                                 &all_bench_runs,
                             )
@@ -989,7 +977,6 @@ impl StageRunner {
                     pid, argv
                 ),
             };
-            all_stage_logs.push(spawn_entry.clone());
             if let Ok(bytes) = encode_log_batch(&[spawn_entry]) {
                 let _ = log_tx.send(bytes).await;
             }
@@ -1005,7 +992,6 @@ impl StageRunner {
                 let line_counter = line_counter.clone();
 
                 tokio::spawn(async move {
-                    let mut collected_logs = Vec::new();
                     let mut collected_bytes = Vec::new();
                     if let Some(out) = stdout {
                         let mut reader = BufReader::new(out).lines();
@@ -1024,7 +1010,6 @@ impl StageRunner {
                                 line_no: l_num,
                                 content: line,
                             };
-                            collected_logs.push(entry.clone());
                             buffer.push(entry);
 
                             if buffer.len() >= 16 {
@@ -1041,7 +1026,7 @@ impl StageRunner {
                             }
                         }
                     }
-                    (collected_logs, collected_bytes)
+                    collected_bytes
                 })
             };
 
@@ -1053,7 +1038,6 @@ impl StageRunner {
                 let line_counter = line_counter.clone();
 
                 tokio::spawn(async move {
-                    let mut collected_logs = Vec::new();
                     let mut collected_bytes = Vec::new();
                     if let Some(err) = stderr {
                         let mut reader = BufReader::new(err).lines();
@@ -1072,7 +1056,6 @@ impl StageRunner {
                                 line_no: l_num,
                                 content: line,
                             };
-                            collected_logs.push(entry.clone());
                             buffer.push(entry);
 
                             if buffer.len() >= 16 {
@@ -1089,19 +1072,16 @@ impl StageRunner {
                             }
                         }
                     }
-                    (collected_logs, collected_bytes)
+                    collected_bytes
                 })
             };
 
             let timeout_duration = Duration::from_secs(task.timeout_seconds);
             let execution_result = timeout(timeout_duration, child.wait()).await;
 
-            let (out_logs, stdout_bytes) = out_handle.await.unwrap_or_default();
-            let (err_logs, stderr_bytes) = err_handle.await.unwrap_or_default();
+            let stdout_bytes = out_handle.await.unwrap_or_default();
+            let stderr_bytes = err_handle.await.unwrap_or_default();
             trace_session.record_tool_execution_ns(tool_exec_start.elapsed().as_nanos() as u64);
-
-            all_stage_logs.extend(out_logs);
-            all_stage_logs.extend(err_logs);
 
             let duration_secs = (Utc::now() - start_time).num_seconds().max(0) as u64;
 
@@ -1143,12 +1123,11 @@ impl StageRunner {
                             status.code()
                         );
                         let child_span = trace_session.finish_span(code, Some(&err_msg));
-                        let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                         let _ = self
                             .telemetry_emitter
                             .emit_stage_bundle(
                                 std::slice::from_ref(&child_span),
-                                &otel_logs,
+                                &[],
                                 &all_test_runs,
                                 &all_bench_runs,
                             )
@@ -1170,12 +1149,11 @@ impl StageRunner {
                     self.cleanup_stage_workspace(stage_dir).await;
                     let err_msg = format!("I/O wait error: {}", e);
                     let child_span = trace_session.finish_span(-1, Some(&err_msg));
-                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                     let _ = self
                         .telemetry_emitter
                         .emit_stage_bundle(
                             std::slice::from_ref(&child_span),
-                            &otel_logs,
+                            &[],
                             &all_test_runs,
                             &all_bench_runs,
                         )
@@ -1200,12 +1178,11 @@ impl StageRunner {
                         inv.tool_name, task.timeout_seconds
                     );
                     let child_span = trace_session.finish_span(124, Some(&err_msg));
-                    let otel_logs = trace_session.correlate_logs(&all_stage_logs);
                     let _ = self
                         .telemetry_emitter
                         .emit_stage_bundle(
                             std::slice::from_ref(&child_span),
-                            &otel_logs,
+                            &[],
                             &all_test_runs,
                             &all_bench_runs,
                         )
@@ -1239,7 +1216,6 @@ impl StageRunner {
                 duration_secs
             ),
         };
-        all_stage_logs.push(exit_entry.clone());
         if let Ok(bytes) = encode_log_batch(&[exit_entry]) {
             let _ = log_tx.send(bytes).await;
         }
@@ -1247,12 +1223,11 @@ impl StageRunner {
         self.cleanup_stage_workspace(stage_dir).await;
 
         let child_span = trace_session.finish_span(0, None);
-        let otel_logs = trace_session.correlate_logs(&all_stage_logs);
         let _ = self
             .telemetry_emitter
             .emit_stage_bundle(
                 std::slice::from_ref(&child_span),
-                &otel_logs,
+                &[],
                 &all_test_runs,
                 &all_bench_runs,
             )
@@ -2287,6 +2262,19 @@ allow_spacemit_ai_thread: false
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn test_stage_runner_w3c_traceparent_and_child_span_subtask_33() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock collector");
+        let collector_addr = listener.local_addr().expect("collector local addr");
+        let collector_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept collector");
+            let mut frames = Vec::new();
+            while let Ok((hdr, payload)) = crate::telemetry_emitter::read_frame(&mut stream).await {
+                frames.push((hdr, payload));
+            }
+            frames
+        });
+
         let dir = tempdir().unwrap();
         let config = WorkerConfig {
             controller_url: "ws://127.0.0.1:8000/api/cluster/tunnel".into(),
@@ -2300,8 +2288,9 @@ allow_spacemit_ai_thread: false
             use_btrfs: false,
             isolation_mode: IsolationMode::None,
         };
-        let runner = StageRunner::new(config);
-        let (tx, _rx) = mpsc::channel(32);
+        let runner = StageRunner::new(config)
+            .with_telemetry_emitter(TelemetryEmitter::new(collector_addr.to_string()));
+        let (tx, mut rx) = mpsc::channel(32);
 
         let parent_tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
         let task = StageDispatchTask {
@@ -2344,6 +2333,26 @@ allow_spacemit_ai_thread: false
         assert_eq!(span.node_id, "worker-riscv64");
         assert!(span.attributes_json.contains("\"cpu_cluster\":\"X100\""));
         assert!(span.attributes_json.contains("\"vlen_bits\":256"));
+
+        let mut streamed_logs = Vec::new();
+        while let Ok(batch_bytes) = rx.try_recv() {
+            let decoded = mu_ci_ipc::decode_log_batch(&batch_bytes).expect("decode log batch");
+            for entry in decoded {
+                assert!(!entry.content.contains('\n') && !entry.content.contains('\r'));
+                streamed_logs.push(entry);
+            }
+        }
+        assert!(
+            streamed_logs.iter().any(|l| l.line_no >= 1),
+            "expected tool output lines streamed once over log_tx"
+        );
+
+        let collector_frames = collector_handle.await.expect("join collector");
+        assert_eq!(collector_frames.len(), 1);
+        assert_eq!(
+            collector_frames[0].0.msg_type,
+            crate::telemetry_emitter::MSG_TYPE_ARROW_OTEL_SPANS
+        );
     }
 
     #[test]
