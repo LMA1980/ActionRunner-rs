@@ -1715,8 +1715,10 @@ impl StageRunner {
 
         // Fallback: directory clone via git checkout (with retry and local cache fallback on transient DNS failure)
         let _ = tokio::fs::create_dir_all(&stage_dir).await;
+        let has_clone_url = !task.clone_url.trim().is_empty();
         let mut cloned = false;
-        for attempt in 1..=3u32 {
+        let max_attempts = if has_clone_url { 3u32 } else { 1u32 };
+        for attempt in 1..=max_attempts {
             let status = Command::new("git")
                 .arg("clone")
                 .arg("--reference")
@@ -1729,9 +1731,9 @@ impl StageRunner {
                 cloned = true;
                 break;
             }
-            let _ = tokio::fs::remove_dir_all(&stage_dir).await;
-            let _ = tokio::fs::create_dir_all(&stage_dir).await;
-            if attempt < 3 {
+            if attempt < max_attempts {
+                let _ = tokio::fs::remove_dir_all(&stage_dir).await;
+                let _ = tokio::fs::create_dir_all(&stage_dir).await;
                 tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
             }
         }
@@ -1797,11 +1799,16 @@ impl StageRunner {
     }
 
     async fn sync_git_cache(&self, task: &StageDispatchTask, repo_cache: &Path) {
+        let max_attempts = if task.clone_url.trim().is_empty() {
+            1u32
+        } else {
+            3u32
+        };
         if !repo_cache.join(".git").exists() && !repo_cache.join("HEAD").exists() {
             if let Some(parent) = repo_cache.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
-            for attempt in 1..=3u32 {
+            for attempt in 1..=max_attempts {
                 let ok = Command::new("git")
                     .arg("clone")
                     .arg(&task.clone_url)
@@ -1812,13 +1819,13 @@ impl StageRunner {
                 if ok {
                     break;
                 }
-                let _ = tokio::fs::remove_dir_all(repo_cache).await;
-                if attempt < 3 {
+                if attempt < max_attempts {
+                    let _ = tokio::fs::remove_dir_all(repo_cache).await;
                     tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
                 }
             }
         } else {
-            for attempt in 1..=3u32 {
+            for attempt in 1..=max_attempts {
                 let ok = Command::new("git")
                     .arg("fetch")
                     .arg("origin")
@@ -1830,7 +1837,7 @@ impl StageRunner {
                 if ok {
                     break;
                 }
-                if attempt < 3 {
+                if attempt < max_attempts {
                     tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
                 }
             }
