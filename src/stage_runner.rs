@@ -1713,23 +1713,69 @@ impl StageRunner {
             }
         }
 
-        // Fallback: directory clone via git checkout
+        // Fallback: directory clone via git checkout (with retry and local cache fallback on transient DNS failure)
         let _ = tokio::fs::create_dir_all(&stage_dir).await;
-        let _ = Command::new("git")
-            .arg("clone")
-            .arg("--reference")
-            .arg(&repo_cache)
-            .arg(&task.clone_url)
-            .arg(&stage_dir)
-            .status()
-            .await;
+        let mut cloned = false;
+        for attempt in 1..=3u32 {
+            let status = Command::new("git")
+                .arg("clone")
+                .arg("--reference")
+                .arg(&repo_cache)
+                .arg(&task.clone_url)
+                .arg(&stage_dir)
+                .status()
+                .await;
+            if status.is_ok_and(|s| s.success()) && stage_dir.join(".git").exists() {
+                cloned = true;
+                break;
+            }
+            let _ = tokio::fs::remove_dir_all(&stage_dir).await;
+            let _ = tokio::fs::create_dir_all(&stage_dir).await;
+            if attempt < 3 {
+                tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
+            }
+        }
+        if !cloned && (repo_cache.join(".git").exists() || repo_cache.join("HEAD").exists()) {
+            let _ = Command::new("git")
+                .arg("clone")
+                .arg("--shared")
+                .arg(&repo_cache)
+                .arg(&stage_dir)
+                .status()
+                .await;
+            let _ = Command::new("git")
+                .arg("fetch")
+                .arg(&repo_cache)
+                .arg(&task.commit_sha)
+                .current_dir(&stage_dir)
+                .status()
+                .await;
+        }
 
-        let _ = Command::new("git")
+        let checkout_ok = Command::new("git")
             .arg("checkout")
+            .arg("-f")
             .arg(&task.commit_sha)
             .current_dir(&stage_dir)
             .status()
-            .await;
+            .await
+            .is_ok_and(|s| s.success());
+        if !checkout_ok && (repo_cache.join(".git").exists() || repo_cache.join("HEAD").exists()) {
+            let _ = Command::new("git")
+                .arg("fetch")
+                .arg(&repo_cache)
+                .arg(&task.commit_sha)
+                .current_dir(&stage_dir)
+                .status()
+                .await;
+            let _ = Command::new("git")
+                .arg("checkout")
+                .arg("-f")
+                .arg("FETCH_HEAD")
+                .current_dir(&stage_dir)
+                .status()
+                .await;
+        }
 
         emit_git_log(format!(
             "[ActionRunner-rs] Checked out target commit '{}' into stage workspace",
@@ -1755,20 +1801,39 @@ impl StageRunner {
             if let Some(parent) = repo_cache.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
-            let _ = Command::new("git")
-                .arg("clone")
-                .arg(&task.clone_url)
-                .arg(repo_cache)
-                .status()
-                .await;
+            for attempt in 1..=3u32 {
+                let ok = Command::new("git")
+                    .arg("clone")
+                    .arg(&task.clone_url)
+                    .arg(repo_cache)
+                    .status()
+                    .await
+                    .is_ok_and(|s| s.success());
+                if ok {
+                    break;
+                }
+                let _ = tokio::fs::remove_dir_all(repo_cache).await;
+                if attempt < 3 {
+                    tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
+                }
+            }
         } else {
-            let _ = Command::new("git")
-                .arg("fetch")
-                .arg("origin")
-                .arg(&task.commit_sha)
-                .current_dir(repo_cache)
-                .status()
-                .await;
+            for attempt in 1..=3u32 {
+                let ok = Command::new("git")
+                    .arg("fetch")
+                    .arg("origin")
+                    .arg(&task.commit_sha)
+                    .current_dir(repo_cache)
+                    .status()
+                    .await
+                    .is_ok_and(|s| s.success());
+                if ok {
+                    break;
+                }
+                if attempt < 3 {
+                    tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
+                }
+            }
         }
     }
 
