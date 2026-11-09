@@ -992,41 +992,21 @@ impl StageRunner {
                 let line_counter = line_counter.clone();
 
                 tokio::spawn(async move {
-                    let mut collected_bytes = Vec::new();
-                    if let Some(out) = stdout {
-                        let mut reader = BufReader::new(out).lines();
-                        let mut buffer = Vec::new();
-
-                        while let Ok(Some(line)) = reader.next_line().await {
-                            collected_bytes.extend_from_slice(line.as_bytes());
-                            collected_bytes.push(b'\n');
-                            let l_num = line_counter.fetch_add(1, Ordering::Relaxed);
-                            let entry = LogEntry {
-                                timestamp_us: Utc::now().timestamp_micros(),
-                                job_id: job_id.clone(),
-                                stage_id: stage_id.clone(),
-                                node_id: node_id.clone(),
-                                stream: 1,
-                                line_no: l_num,
-                                content: line,
-                            };
-                            buffer.push(entry);
-
-                            if buffer.len() >= 16 {
-                                if let Ok(bytes) = encode_log_batch(&buffer) {
-                                    let _ = log_tx.send(bytes).await;
-                                }
-                                buffer.clear();
-                            }
+                    match stdout {
+                        Some(out) => {
+                            pump_stream_with_flush_ticker(
+                                out,
+                                1,
+                                job_id,
+                                stage_id,
+                                node_id,
+                                line_counter,
+                                log_tx,
+                            )
+                            .await
                         }
-
-                        if !buffer.is_empty() {
-                            if let Ok(bytes) = encode_log_batch(&buffer) {
-                                let _ = log_tx.send(bytes).await;
-                            }
-                        }
+                        None => Vec::new(),
                     }
-                    collected_bytes
                 })
             };
 
@@ -1038,41 +1018,21 @@ impl StageRunner {
                 let line_counter = line_counter.clone();
 
                 tokio::spawn(async move {
-                    let mut collected_bytes = Vec::new();
-                    if let Some(err) = stderr {
-                        let mut reader = BufReader::new(err).lines();
-                        let mut buffer = Vec::new();
-
-                        while let Ok(Some(line)) = reader.next_line().await {
-                            collected_bytes.extend_from_slice(line.as_bytes());
-                            collected_bytes.push(b'\n');
-                            let l_num = line_counter.fetch_add(1, Ordering::Relaxed);
-                            let entry = LogEntry {
-                                timestamp_us: Utc::now().timestamp_micros(),
-                                job_id: job_id.clone(),
-                                stage_id: stage_id.clone(),
-                                node_id: node_id.clone(),
-                                stream: 2,
-                                line_no: l_num,
-                                content: line,
-                            };
-                            buffer.push(entry);
-
-                            if buffer.len() >= 16 {
-                                if let Ok(bytes) = encode_log_batch(&buffer) {
-                                    let _ = log_tx.send(bytes).await;
-                                }
-                                buffer.clear();
-                            }
+                    match stderr {
+                        Some(err) => {
+                            pump_stream_with_flush_ticker(
+                                err,
+                                2,
+                                job_id,
+                                stage_id,
+                                node_id,
+                                line_counter,
+                                log_tx,
+                            )
+                            .await
                         }
-
-                        if !buffer.is_empty() {
-                            if let Ok(bytes) = encode_log_batch(&buffer) {
-                                let _ = log_tx.send(bytes).await;
-                            }
-                        }
+                        None => Vec::new(),
                     }
-                    collected_bytes
                 })
             };
 
@@ -1753,23 +1713,71 @@ impl StageRunner {
             }
         }
 
-        // Fallback: directory clone via git checkout
+        // Fallback: directory clone via git checkout (with retry and local cache fallback on transient DNS failure)
         let _ = tokio::fs::create_dir_all(&stage_dir).await;
-        let _ = Command::new("git")
-            .arg("clone")
-            .arg("--reference")
-            .arg(&repo_cache)
-            .arg(&task.clone_url)
-            .arg(&stage_dir)
-            .status()
-            .await;
+        let has_clone_url = !task.clone_url.trim().is_empty();
+        let mut cloned = false;
+        let max_attempts = if has_clone_url { 3u32 } else { 1u32 };
+        for attempt in 1..=max_attempts {
+            let status = Command::new("git")
+                .arg("clone")
+                .arg("--reference")
+                .arg(&repo_cache)
+                .arg(&task.clone_url)
+                .arg(&stage_dir)
+                .status()
+                .await;
+            if status.is_ok_and(|s| s.success()) && stage_dir.join(".git").exists() {
+                cloned = true;
+                break;
+            }
+            if attempt < max_attempts {
+                let _ = tokio::fs::remove_dir_all(&stage_dir).await;
+                let _ = tokio::fs::create_dir_all(&stage_dir).await;
+                tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
+            }
+        }
+        if !cloned && (repo_cache.join(".git").exists() || repo_cache.join("HEAD").exists()) {
+            let _ = Command::new("git")
+                .arg("clone")
+                .arg("--shared")
+                .arg(&repo_cache)
+                .arg(&stage_dir)
+                .status()
+                .await;
+            let _ = Command::new("git")
+                .arg("fetch")
+                .arg(&repo_cache)
+                .arg(&task.commit_sha)
+                .current_dir(&stage_dir)
+                .status()
+                .await;
+        }
 
-        let _ = Command::new("git")
+        let checkout_ok = Command::new("git")
             .arg("checkout")
+            .arg("-f")
             .arg(&task.commit_sha)
             .current_dir(&stage_dir)
             .status()
-            .await;
+            .await
+            .is_ok_and(|s| s.success());
+        if !checkout_ok && (repo_cache.join(".git").exists() || repo_cache.join("HEAD").exists()) {
+            let _ = Command::new("git")
+                .arg("fetch")
+                .arg(&repo_cache)
+                .arg(&task.commit_sha)
+                .current_dir(&stage_dir)
+                .status()
+                .await;
+            let _ = Command::new("git")
+                .arg("checkout")
+                .arg("-f")
+                .arg("FETCH_HEAD")
+                .current_dir(&stage_dir)
+                .status()
+                .await;
+        }
 
         emit_git_log(format!(
             "[ActionRunner-rs] Checked out target commit '{}' into stage workspace",
@@ -1791,24 +1799,48 @@ impl StageRunner {
     }
 
     async fn sync_git_cache(&self, task: &StageDispatchTask, repo_cache: &Path) {
+        let max_attempts = if task.clone_url.trim().is_empty() {
+            1u32
+        } else {
+            3u32
+        };
         if !repo_cache.join(".git").exists() && !repo_cache.join("HEAD").exists() {
             if let Some(parent) = repo_cache.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
-            let _ = Command::new("git")
-                .arg("clone")
-                .arg(&task.clone_url)
-                .arg(repo_cache)
-                .status()
-                .await;
+            for attempt in 1..=max_attempts {
+                let ok = Command::new("git")
+                    .arg("clone")
+                    .arg(&task.clone_url)
+                    .arg(repo_cache)
+                    .status()
+                    .await
+                    .is_ok_and(|s| s.success());
+                if ok {
+                    break;
+                }
+                if attempt < max_attempts {
+                    let _ = tokio::fs::remove_dir_all(repo_cache).await;
+                    tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
+                }
+            }
         } else {
-            let _ = Command::new("git")
-                .arg("fetch")
-                .arg("origin")
-                .arg(&task.commit_sha)
-                .current_dir(repo_cache)
-                .status()
-                .await;
+            for attempt in 1..=max_attempts {
+                let ok = Command::new("git")
+                    .arg("fetch")
+                    .arg("origin")
+                    .arg(&task.commit_sha)
+                    .current_dir(repo_cache)
+                    .status()
+                    .await
+                    .is_ok_and(|s| s.success());
+                if ok {
+                    break;
+                }
+                if attempt < max_attempts {
+                    tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
+                }
+            }
         }
     }
 
@@ -1849,6 +1881,75 @@ impl StageRunner {
         }
         let _ = tokio::fs::remove_dir_all(stage_dir).await;
     }
+}
+
+/// Reads lines from an async stream (`stdout` = 1, `stderr` = 2) and flushes encoded
+/// [`LogEntry`] batches over `log_tx` whenever 16 lines accumulate OR a `250ms`
+/// interval elapses with a non-empty buffer, preventing multi-minute stalls and
+/// out-of-order `stderr` tail dumps on long-running stages (`#49`).
+async fn pump_stream_with_flush_ticker<R>(
+    stream_reader: R,
+    stream_id: i8,
+    job_id: String,
+    stage_id: String,
+    node_id: String,
+    line_counter: Arc<AtomicU32>,
+    log_tx: mpsc::Sender<Vec<u8>>,
+) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut collected_bytes = Vec::new();
+    let mut reader = BufReader::new(stream_reader).lines();
+    let mut buffer = Vec::new();
+    let mut flush_tick = tokio::time::interval(Duration::from_millis(250));
+    flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    flush_tick.tick().await;
+
+    loop {
+        tokio::select! {
+            res = reader.next_line() => {
+                match res {
+                    Ok(Some(line)) => {
+                        collected_bytes.extend_from_slice(line.as_bytes());
+                        collected_bytes.push(b'\n');
+                        let l_num = line_counter.fetch_add(1, Ordering::Relaxed);
+                        let entry = LogEntry {
+                            timestamp_us: Utc::now().timestamp_micros(),
+                            job_id: job_id.clone(),
+                            stage_id: stage_id.clone(),
+                            node_id: node_id.clone(),
+                            stream: stream_id,
+                            line_no: l_num,
+                            content: line,
+                        };
+                        buffer.push(entry);
+
+                        if buffer.len() >= 16 {
+                            if let Ok(bytes) = encode_log_batch(&buffer) {
+                                let _ = log_tx.send(bytes).await;
+                            }
+                            buffer.clear();
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            _ = flush_tick.tick(), if !buffer.is_empty() => {
+                if let Ok(bytes) = encode_log_batch(&buffer) {
+                    let _ = log_tx.send(bytes).await;
+                }
+                buffer.clear();
+            }
+        }
+    }
+
+    if !buffer.is_empty() {
+        if let Ok(bytes) = encode_log_batch(&buffer) {
+            let _ = log_tx.send(bytes).await;
+        }
+    }
+    collected_bytes
 }
 
 #[cfg(test)]
@@ -2664,5 +2765,50 @@ allow_spacemit_ai_thread: false
         .expect_err("broken daemon must return Err");
         assert!(err.contains("sccache health check failed"));
         assert!(err.contains("S3 endpoint unreachable"));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_pump_stream_with_flush_ticker_flushes_sub_batch_lines_before_eof() {
+        use mu_ci_ipc::decode_log_batch;
+        use tokio::io::AsyncWriteExt;
+
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let (log_tx, mut log_rx) = mpsc::channel::<Vec<u8>>(16);
+        let line_counter = Arc::new(AtomicU32::new(1));
+
+        let pump_task = tokio::spawn(pump_stream_with_flush_ticker(
+            reader,
+            2,
+            "job-ticker-test".to_string(),
+            "miri-check".to_string(),
+            "worker-riscv64".to_string(),
+            line_counter,
+            log_tx,
+        ));
+
+        // Write 3 lines (< 16 batch threshold) and keep the stream open (simulating a long stage).
+        writer
+            .write_all(b"   Compiling mu-ci-worker v0.1.0\n    Finished `test` profile\n     Running unittests src/lib.rs\n")
+            .await
+            .expect("write lines");
+
+        // Expect the 250ms ticker to flush the 3 buffered lines well before EOF.
+        let batch_bytes = tokio::time::timeout(Duration::from_millis(800), log_rx.recv())
+            .await
+            .expect("sub-16 line batch must flush within 800ms before EOF")
+            .expect("log_tx channel open");
+        let decoded = decode_log_batch(&batch_bytes).expect("decode log batch");
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0].stream, 2);
+        assert_eq!(decoded[0].line_no, 1);
+        assert_eq!(decoded[0].content, "   Compiling mu-ci-worker v0.1.0");
+        assert_eq!(decoded[2].line_no, 3);
+        assert_eq!(decoded[2].content, "     Running unittests src/lib.rs");
+
+        // Close writer and verify collected bytes match.
+        drop(writer);
+        let collected = pump_task.await.expect("pump task join");
+        assert!(String::from_utf8_lossy(&collected).contains("Running unittests"));
     }
 }
