@@ -59,7 +59,7 @@ Workflows are defined in YAML and triggered based on GitHub webhook events:
 - `GET /jobs/{id}/log` (`/api/jobs/{id}/log`) — View full stdout/stderr build and test logs.
 
 ### 2. Badges & Factory Scorecards
-- `GET /badges/{owner}/{repo}/status.svg` — Build status badge (`k3-ci | passing`).
+- `GET /badges/{owner}/{repo}/status.svg` — Build status badge (`continuous integration | passing`).
 - `GET /badges/{owner}/{repo}/score.svg` — Quality score badge (`k3 score | 100% A+`).
 - `GET /badges/{owner}/{repo}/coverage.svg` — Code coverage badge (`coverage | 87.9%`).
 - `GET /badges/{owner}/{repo}/benchmark.svg` — Benchmark badge (`cargo bench | 49.0 ns/iter`).
