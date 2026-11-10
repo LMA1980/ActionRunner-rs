@@ -325,11 +325,7 @@ fn test_challenge_4_fail_closed_secret_resolution() {
     ];
     for path_str in nonexistent_paths {
         let res = WorkerConfig::resolve_secret_value(path_str);
-        assert_eq!(
-            res, None,
-            "Nonexistent path '{}' must fail closed to None, but returned {:?}",
-            path_str, res
-        );
+        assert!(res.is_none(), "Nonexistent path must fail closed to None");
     }
 
     // 2. Unreadable / Empty files MUST return None
@@ -354,10 +350,9 @@ fn test_challenge_4_fail_closed_secret_resolution() {
     fs::write(&unreadable_file, "valid-secret-content").unwrap();
     fs::set_permissions(&unreadable_file, fs::Permissions::from_mode(0o000)).unwrap();
     let unreadable_res = WorkerConfig::resolve_secret_value(unreadable_file.to_str().unwrap());
-    assert_eq!(
-        unreadable_res, None,
-        "Unreadable (chmod 000) secret file must fail closed to None, got {:?}",
-        unreadable_res
+    assert!(
+        unreadable_res.is_none(),
+        "Unreadable (chmod 000) secret file must fail closed to None"
     );
     // Restore permissions for cleanup
     fs::set_permissions(&unreadable_file, fs::Permissions::from_mode(0o600)).unwrap();
