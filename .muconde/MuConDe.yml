@@ -1,0 +1,27 @@
+version: "1"
+service: "mu-ci-worker"
+
+target_nodes:
+  - "node-a"
+  - "node-b"
+  - "worker-riscv64"
+
+lease_ttl_seconds: 300
+warmup_timeout_seconds: 30
+bake_window_seconds: 60
+max_error_logs: 0
+max_p99_latency_ms: 250.0
+integration_tests: "all"
+
+deployment:
+  target_nodes:
+    - "node-a"
+    - "node-b"
+    - "worker-riscv64"
+  binary: "mu-ci-worker"
+  install_path: "/usr/local/bin/mu-ci-worker"
+  systemd_unit: "mu-ci-worker.service"
+
+verification:
+  bake_window_secs: 60
+  rollback_on_failure: true

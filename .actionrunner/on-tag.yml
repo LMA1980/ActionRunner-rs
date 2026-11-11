@@ -1,0 +1,16 @@
+version: "2"
+name: "MuRegist Tag Release Pipeline"
+
+stages:
+  - id: test-check
+    name: "Run Verification Tests"
+    tags: ["test"]
+    threads: 4
+    run: "cargo test --workspace"
+
+  - id: muregist-publish
+    name: "Publish Release Artifact to MuRegist"
+    tags: ["build"]
+    depends_on: ["test-check"]
+    threads: 2
+    run: "cargo publish --registry muregist --dry-run"
