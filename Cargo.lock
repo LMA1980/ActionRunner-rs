@@ -754,7 +754,7 @@ dependencies = [
 [[package]]
 name = "mu-ci-ipc"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/mu-ci-ipc.git?branch=feat%2Fm8-naming-alignment#7339993636e3a54c2d6b8d2b0261f060d5e1911f"
+source = "git+https://github.com/LMA1980/mu-ci-ipc.git?branch=main#1d4c2cfd87e7bcc96db12af122b91f17b2dcf000"
 dependencies = [
  "arrow",
  "bytes",
@@ -771,7 +771,7 @@ dependencies = [
 [[package]]
 name = "mu-ci-isolation"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/mu-ci-isolation.git?branch=feat%2Fm8-naming-alignment#98117ee3d6270c6ca9f290c2881515db65d7147b"
+source = "git+https://github.com/LMA1980/mu-ci-isolation.git?branch=main#0a7a5b16c724035ca4e94b9166afd7f51fb32555"
 dependencies = [
  "landlock",
  "libc",
@@ -786,7 +786,7 @@ dependencies = [
 [[package]]
 name = "mu-ci-tools"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/mu-ci-tools.git?branch=feat%2Fm8-naming-alignment#23341f16720d22530f488f6f3d39cf5bc0a47ea7"
+source = "git+https://github.com/LMA1980/mu-ci-tools.git?branch=main#5d920017e7a2d70f388096fb0ec357c09e59f1c7"
 dependencies = [
  "serde",
  "serde_json",
@@ -821,7 +821,7 @@ dependencies = [
 [[package]]
 name = "mu-observable-ipc"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/mu-observable-ipc.git?branch=feat%2Fm8-naming-alignment#28793ce66732461cb68c3aef3006154939265abb"
+source = "git+https://github.com/LMA1980/mu-observable-ipc.git?branch=main#f6755f6aef6d00a6043fe0c842493477ab62aeb4"
 dependencies = [
  "arrow",
  "bytes",
