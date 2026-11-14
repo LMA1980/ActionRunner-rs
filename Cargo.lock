@@ -765,7 +765,7 @@ dependencies = [
 [[package]]
 name = "mu-ci-ipc"
 version = "0.1.1"
-source = "git+https://github.com/LMA1980/mu-ci-ipc.git?branch=main#b09509476659bad39097c4395a2c2af47b9d9dab"
+source = "git+https://github.com/LMA1980/mu-ci-ipc.git?branch=main#d12e4534dea9a1ead292401940462799b73f2b33"
 dependencies = [
  "arrow",
  "bytes",

@@ -17,6 +17,7 @@ fn make_test_config(max_slots: u32) -> WorkerConfig {
         toolchains: vec!["system".to_string()],
         use_btrfs: false,
         isolation_mode: IsolationMode::None,
+        rust_semver: None,
     }
 }
 
@@ -594,6 +595,7 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
         toolchains: vec!["system".to_string()],
         use_btrfs: false,
         isolation_mode: IsolationMode::None,
+        rust_semver: Some("1.86.0".to_string()),
     };
 
     let worker = Arc::new(WorkerAgent::new(config));
@@ -616,6 +618,7 @@ async fn test_challenge_7_e2e_worker_tunnel_dispatch_and_exclusivity() {
         let reg = fory.deserialize::<WorkerRegistration>(payload).unwrap();
         assert_eq!(reg.node_id, "test-node-m3");
         assert_eq!(reg.max_slots, 2);
+        assert_eq!(reg.rust_semver.as_deref(), Some("1.86.0"));
 
         // 2. Dispatch a long-running shared task
         let shared_task = StageDispatchTask {

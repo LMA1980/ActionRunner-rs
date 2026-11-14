@@ -1,5 +1,5 @@
 use mu_ci_ipc::{decode_log_batch, SandboxConstraintSpec, StageDispatchTask, TypedTaskInvocation};
-use mu_ci_worker::config::{IsolationMode, WorkerConfig};
+use mu_ci_worker::config::{parse_rustc_semver, IsolationMode, WorkerConfig};
 use mu_ci_worker::stage_runner::StageRunner;
 use mu_ci_worker::worker::WorkerAgent;
 use std::time::Duration;
@@ -13,6 +13,12 @@ fn test_worker_config_defaults() {
     assert!(config.max_slots >= 1);
     assert!(config.max_threads() >= 1);
     assert!(!config.tags.is_empty());
+    if let Some(ref semver) = config.rust_semver {
+        assert_eq!(
+            parse_rustc_semver(&format!("rustc {semver}")).as_deref(),
+            Some(semver.as_str())
+        );
+    }
 }
 
 #[tokio::test]
@@ -29,6 +35,7 @@ async fn test_stage_runner_execution_and_log_batching() {
         toolchains: vec!["system".to_string()],
         use_btrfs: false,
         isolation_mode: IsolationMode::None,
+        rust_semver: None,
     };
 
     let runner = StageRunner::new(config);
@@ -233,6 +240,7 @@ async fn test_path_traversal_rejection_absolute_working_dir() {
         toolchains: vec!["system".to_string()],
         use_btrfs: false,
         isolation_mode: IsolationMode::None,
+        rust_semver: None,
     };
     let runner = StageRunner::new(config);
     let (log_tx, _log_rx) = mpsc::channel(32);
@@ -282,6 +290,7 @@ async fn test_path_traversal_rejection_parent_dir() {
         toolchains: vec!["system".to_string()],
         use_btrfs: false,
         isolation_mode: IsolationMode::None,
+        rust_semver: None,
     };
     let runner = StageRunner::new(config);
     let (log_tx, _log_rx) = mpsc::channel(32);
@@ -331,6 +340,7 @@ async fn test_path_traversal_rejection_malicious_repo_and_ids() {
         toolchains: vec!["system".to_string()],
         use_btrfs: false,
         isolation_mode: IsolationMode::None,
+        rust_semver: None,
     };
     let runner = StageRunner::new(config);
     let (log_tx, _log_rx) = mpsc::channel(32);
@@ -473,6 +483,7 @@ async fn test_stage_runner_streams_spans_and_correlated_logs_to_muobserve_collec
         toolchains: vec!["system".to_string()],
         use_btrfs: false,
         isolation_mode: IsolationMode::None,
+        rust_semver: None,
     };
 
     let emitter = TelemetryEmitter::new(collector_addr).with_timeout(Duration::from_secs(2));

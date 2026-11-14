@@ -827,6 +827,7 @@ mod tests {
             toolchains: vec!["system".to_string()],
             use_btrfs: false,
             isolation_mode: IsolationMode::None,
+            rust_semver: None,
         }
     }
 

@@ -291,6 +291,7 @@ impl WorkerAgent {
             ram_total_mb,
             btrfs_enabled: self.config.use_btrfs,
             toolchains: self.config.toolchains.clone(),
+            rust_semver: self.config.rust_semver.clone(),
         };
 
         let reg_payload = fory.serialize(&reg)?;
@@ -323,7 +324,12 @@ impl WorkerAgent {
                 "Timed out sending WorkerRegistration frame to coordinator",
             )
         })??;
-        info!("Registered with coordinator as '{}'", self.config.node_id);
+        info!(
+            node_id = %self.config.node_id,
+            rust_semver = ?self.config.rust_semver,
+            "Registered with coordinator as '{}'",
+            self.config.node_id
+        );
 
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(128);
 

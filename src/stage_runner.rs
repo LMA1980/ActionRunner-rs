@@ -2074,6 +2074,7 @@ mod tests {
             toolchains: vec![],
             use_btrfs: false,
             isolation_mode: IsolationMode::None,
+            rust_semver: None,
         };
         let runner = StageRunner::new(config);
         let (tx, _rx) = mpsc::channel(10);
@@ -2156,6 +2157,7 @@ mod tests {
             toolchains: vec![],
             use_btrfs: false,
             isolation_mode: IsolationMode::None,
+            rust_semver: None,
         };
         let runner = StageRunner::new(config);
         let (tx, _rx) = mpsc::channel(10);
@@ -2230,6 +2232,7 @@ allow_spacemit_ai_thread: false
             toolchains: vec![],
             use_btrfs: false,
             isolation_mode: IsolationMode::None,
+            rust_semver: None,
         };
 
         let runner = StageRunner::with_sandbox_runner(config, sandbox_runner);
@@ -2297,6 +2300,7 @@ allow_spacemit_ai_thread: false
             toolchains: vec![],
             use_btrfs: false,
             isolation_mode: IsolationMode::None,
+            rust_semver: None,
         };
         let runner = StageRunner::new(config);
         let (tx, _rx) = mpsc::channel(10);
@@ -2388,6 +2392,7 @@ allow_spacemit_ai_thread: false
             toolchains: vec![],
             use_btrfs: false,
             isolation_mode: IsolationMode::None,
+            rust_semver: None,
         };
         let runner = StageRunner::new(config)
             .with_telemetry_emitter(TelemetryEmitter::new(collector_addr.to_string()));
@@ -2479,6 +2484,7 @@ allow_spacemit_ai_thread: false
             ],
             use_btrfs: false,
             isolation_mode: IsolationMode::None,
+            rust_semver: None,
         };
         let cross_runner = StageRunner::new(cross_cfg);
 
@@ -2575,6 +2581,7 @@ allow_spacemit_ai_thread: false
             toolchains: vec!["system".into()],
             use_btrfs: false,
             isolation_mode: IsolationMode::None,
+            rust_semver: None,
         };
         let runner = StageRunner::new(cfg);
         let sccache_path = Path::new("/usr/local/bin/sccache");

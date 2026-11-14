@@ -32,6 +32,7 @@ fn make_test_config(workspace_dir: PathBuf) -> WorkerConfig {
         toolchains: vec!["system".to_string()],
         use_btrfs: false,
         isolation_mode: IsolationMode::None,
+        rust_semver: None,
     }
 }
 
