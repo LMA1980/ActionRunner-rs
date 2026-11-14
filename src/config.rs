@@ -13,6 +13,7 @@ pub struct WorkerConfig {
     pub toolchains: Vec<String>,
     pub use_btrfs: bool,
     pub isolation_mode: IsolationMode,
+    pub rust_semver: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +93,8 @@ impl WorkerConfig {
             _ => IsolationMode::None,
         };
 
+        let rust_semver = Self::probe_rustc_semver();
+
         let cfg = Self {
             controller_url,
             cluster_token,
@@ -103,6 +106,7 @@ impl WorkerConfig {
             toolchains,
             use_btrfs,
             isolation_mode,
+            rust_semver,
         };
 
         info!(
@@ -112,6 +116,7 @@ impl WorkerConfig {
             max_threads = cfg.max_threads(),
             tags = ?cfg.tags,
             toolchains = ?cfg.toolchains,
+            rust_semver = ?cfg.rust_semver,
             btrfs = cfg.use_btrfs,
             "Loaded ActionRunner worker configuration"
         );
@@ -292,6 +297,283 @@ impl WorkerConfig {
             Some(val.to_string())
         }
     }
+
+    /// Resolve the `rustc` binary path while honoring `ACTION_RUNNER_RUSTC_BIN`,
+    /// `CARGO_HOME`, `PATH`, `RUSTUP_HOME`, `HOME`, and the service-account fallback.
+    pub fn resolve_rustc_bin_from(
+        explicit_bin: Option<&Path>,
+        cargo_home: Option<&Path>,
+        rustup_home: Option<&Path>,
+        path_env: Option<&std::ffi::OsStr>,
+        home: Option<&Path>,
+    ) -> PathBuf {
+        if let Some(explicit) = explicit_bin.filter(|p| !p.as_os_str().is_empty()) {
+            return explicit.to_path_buf();
+        }
+
+        if let Some(ch) = cargo_home.filter(|p| !p.as_os_str().is_empty()) {
+            let candidate = ch.join("bin").join("rustc");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+
+        if let Some(pe) = path_env {
+            for dir in std::env::split_paths(pe) {
+                let candidate = dir.join("rustc");
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+
+        if let Some(rh) = rustup_home.filter(|p| !p.as_os_str().is_empty()) {
+            if let Some(parent) = rh.parent() {
+                let candidate = parent.join(".cargo").join("bin").join("rustc");
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+
+        if let Some(h) = home.filter(|p| !p.as_os_str().is_empty()) {
+            let candidate = h.join(".cargo").join("bin").join("rustc");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+
+        let service_candidate = Path::new("/var/lib/action-runner/.cargo/bin/rustc");
+        if service_candidate.is_file() {
+            return service_candidate.to_path_buf();
+        }
+
+        PathBuf::from("rustc")
+    }
+
+    /// Detect the `rustc` binary using the current process environment.
+    pub fn detect_rustc_bin() -> PathBuf {
+        let explicit = std::env::var_os("ACTION_RUNNER_RUSTC_BIN").map(PathBuf::from);
+        let cargo_home = std::env::var_os("CARGO_HOME").map(PathBuf::from);
+        let rustup_home = std::env::var_os("RUSTUP_HOME").map(PathBuf::from);
+        let path_env = std::env::var_os("PATH");
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        Self::resolve_rustc_bin_from(
+            explicit.as_deref(),
+            cargo_home.as_deref(),
+            rustup_home.as_deref(),
+            path_env.as_deref(),
+            home.as_deref(),
+        )
+    }
+
+    /// Construct the `rustc --version` probe command with optional `RUSTUP_HOME` and `CARGO_HOME`.
+    pub fn build_rustc_probe_command(
+        rustc_bin: &Path,
+        rustup_home: Option<&Path>,
+        cargo_home: Option<&Path>,
+    ) -> std::process::Command {
+        let mut cmd = std::process::Command::new(rustc_bin);
+        cmd.arg("--version");
+        if let Some(home) = rustup_home.filter(|p| !p.as_os_str().is_empty()) {
+            cmd.env("RUSTUP_HOME", home);
+        }
+        if let Some(home) = cargo_home.filter(|p| !p.as_os_str().is_empty()) {
+            cmd.env("CARGO_HOME", home);
+        }
+        cmd
+    }
+
+    /// Probe the active `rustc --version` under the current process or service-account environment.
+    ///
+    /// Fails soft (`None`) with a warning log if `rustc` cannot be executed or parsed.
+    pub fn probe_rustc_semver() -> Option<String> {
+        let explicit = std::env::var_os("ACTION_RUNNER_RUSTC_BIN").map(PathBuf::from);
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty());
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty());
+        let path_env = std::env::var_os("PATH");
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+
+        let rustc_bin = Self::resolve_rustc_bin_from(
+            explicit.as_deref(),
+            cargo_home.as_deref(),
+            rustup_home.as_deref(),
+            path_env.as_deref(),
+            home.as_deref(),
+        );
+
+        let effective_rustup_home = rustup_home.or_else(|| {
+            if rustc_bin.starts_with("/var/lib/action-runner")
+                && Path::new("/var/lib/action-runner/.rustup").is_dir()
+            {
+                Some(PathBuf::from("/var/lib/action-runner/.rustup"))
+            } else {
+                None
+            }
+        });
+        let effective_cargo_home = cargo_home.or_else(|| {
+            if rustc_bin.starts_with("/var/lib/action-runner")
+                && Path::new("/var/lib/action-runner/.cargo").is_dir()
+            {
+                Some(PathBuf::from("/var/lib/action-runner/.cargo"))
+            } else {
+                None
+            }
+        });
+
+        Self::probe_rustc_semver_for(
+            &rustc_bin,
+            effective_rustup_home.as_deref(),
+            effective_cargo_home.as_deref(),
+        )
+    }
+
+    /// Probe `rustc --version` for a specific binary path and optional `RUSTUP_HOME` / `CARGO_HOME`.
+    pub fn probe_rustc_semver_for(
+        rustc_bin: &Path,
+        rustup_home: Option<&Path>,
+        cargo_home: Option<&Path>,
+    ) -> Option<String> {
+        let mut cmd = Self::build_rustc_probe_command(rustc_bin, rustup_home, cargo_home);
+        Self::probe_rustc_semver_with(rustc_bin, || cmd.output())
+    }
+
+    fn probe_rustc_semver_with<F>(rustc_bin: &Path, run: F) -> Option<String>
+    where
+        F: FnOnce() -> std::io::Result<std::process::Output>,
+    {
+        match run() {
+            Ok(output) => {
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    warn!(
+                        bin = %rustc_bin.display(),
+                        status = %output.status,
+                        stderr = %stderr.trim(),
+                        "rustc --version exited unsuccessfully during startup probe; continuing with rust_semver = None"
+                    );
+                    return None;
+                }
+                match std::str::from_utf8(&output.stdout) {
+                    Ok(stdout) => match parse_rustc_semver(stdout) {
+                        Some(ver) => Some(ver),
+                        None => {
+                            warn!(
+                                bin = %rustc_bin.display(),
+                                stdout = %stdout.trim(),
+                                "Failed to parse semver from rustc --version output; continuing with rust_semver = None"
+                            );
+                            None
+                        }
+                    },
+                    Err(err) => {
+                        warn!(
+                            bin = %rustc_bin.display(),
+                            error = %err,
+                            "rustc --version emitted non-UTF-8 stdout; continuing with rust_semver = None"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(err) => {
+                warn!(
+                    bin = %rustc_bin.display(),
+                    error = %err,
+                    "Unable to invoke rustc --version during startup probe; continuing with rust_semver = None"
+                );
+                None
+            }
+        }
+    }
+}
+
+/// Parses the semantic version token from `rustc --version` output.
+///
+/// Supports stable (`rustc 1.86.0 (...)`), beta (`rustc 1.87.0-beta.2 (...)`),
+/// nightly (`rustc 1.88.0-nightly (...)`), and dev (`rustc 1.88.0-dev`) outputs.
+/// Returns `None` for empty, non-`rustc`, or malformed version strings.
+pub fn parse_rustc_semver(output: &str) -> Option<String> {
+    let line = output.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "rustc" {
+        return None;
+    }
+    let version_token = parts.next()?;
+    if !is_valid_semver(version_token) {
+        return None;
+    }
+    Some(version_token.to_string())
+}
+
+fn is_valid_semver_ident(ident: &str, allow_leading_zero: bool) -> bool {
+    if ident.is_empty() {
+        return false;
+    }
+    if !allow_leading_zero
+        && ident.len() > 1
+        && ident.starts_with('0')
+        && ident.bytes().all(|b| b.is_ascii_digit())
+    {
+        return false;
+    }
+    ident
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+fn is_valid_numeric_component(part: &str) -> bool {
+    if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    if part.len() > 1 && part.starts_with('0') {
+        return false;
+    }
+    part.parse::<u64>().is_ok()
+}
+
+fn is_valid_semver(version: &str) -> bool {
+    let (core_and_pre, build_opt) = match version.split_once('+') {
+        Some((before, build)) => (before, Some(build)),
+        None => (version, None),
+    };
+    if let Some(build) = build_opt {
+        if build.is_empty() || !build.split('.').all(|id| is_valid_semver_ident(id, true)) {
+            return false;
+        }
+    }
+
+    let (core, pre_opt) = match core_and_pre.split_once('-') {
+        Some((before, pre)) => (before, Some(pre)),
+        None => (core_and_pre, None),
+    };
+    if let Some(pre) = pre_opt {
+        if pre.is_empty()
+            || !pre.split('.').all(|id| {
+                let numeric = id.bytes().all(|b| b.is_ascii_digit());
+                is_valid_semver_ident(id, !numeric)
+            })
+        {
+            return false;
+        }
+    }
+
+    let mut core_parts = core.split('.');
+    let (Some(major), Some(minor), Some(patch), None) = (
+        core_parts.next(),
+        core_parts.next(),
+        core_parts.next(),
+        core_parts.next(),
+    ) else {
+        return false;
+    };
+    is_valid_numeric_component(major)
+        && is_valid_numeric_component(minor)
+        && is_valid_numeric_component(patch)
 }
 
 pub fn is_safe_repo_name(repo: &str) -> bool {
@@ -408,5 +690,257 @@ mod tests {
         assert!(!is_safe_repo_name("LMA1980"));
         assert!(!is_safe_repo_name("LMA1980/repo/extra"));
         assert!(!is_safe_repo_name("LMA1980/repo;rm -rf /"));
+    }
+
+    #[test]
+    fn test_parse_rustc_semver_stable() {
+        assert_eq!(
+            parse_rustc_semver("rustc 1.86.0 (05f9846f8 2025-03-31)\n"),
+            Some("1.86.0".to_string())
+        );
+        assert_eq!(
+            parse_rustc_semver("  rustc 1.99.1 (58cf8f9c3 2026-10-13)  \r\n"),
+            Some("1.99.1".to_string())
+        );
+        assert_eq!(
+            parse_rustc_semver("rustc 1.86.0"),
+            Some("1.86.0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_rustc_semver_nightly_and_beta() {
+        assert_eq!(
+            parse_rustc_semver("rustc 1.88.0-nightly (123456789 2025-05-01)\n"),
+            Some("1.88.0-nightly".to_string())
+        );
+        assert_eq!(
+            parse_rustc_semver("rustc 1.87.0-beta.2 (abcdef123 2025-04-15)"),
+            Some("1.87.0-beta.2".to_string())
+        );
+        assert_eq!(
+            parse_rustc_semver("rustc 1.87.0-beta (abcdef123 2025-04-15)"),
+            Some("1.87.0-beta".to_string())
+        );
+        assert_eq!(
+            parse_rustc_semver("rustc 1.85.0-dev"),
+            Some("1.85.0-dev".to_string())
+        );
+        assert_eq!(
+            parse_rustc_semver("rustc 1.86.0+custom.1 (abcdef 2025-01-01)"),
+            Some("1.86.0+custom.1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_rustc_semver_malformed() {
+        for invalid in [
+            "",
+            "   \n\t ",
+            "cargo 1.86.0 (05f9846f8 2025-03-31)",
+            "rustc",
+            "rustc 1.86",
+            "rustc 1.86.0.1",
+            "rustc v1.86.0 (05f9846f8 2025-03-31)",
+            "rustc 1.86.x (05f9846f8 2025-03-31)",
+            "rustc 01.86.0",
+            "rustc 1.86.0-",
+            "rustc 1.86.0-nightly.",
+            "rustc 1.86.0+",
+            "not a rustc banner",
+        ] {
+            assert_eq!(
+                parse_rustc_semver(invalid),
+                None,
+                "Expected None for malformed output: {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_rustc_bin_and_probe_command_respect_service_account_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo_home = dir.path().join("cargo");
+        let rustup_home = dir.path().join("rustup");
+        let path_dir = dir.path().join("path-bin");
+        let home_dir = dir.path().join("home");
+        let sibling_cargo_bin = dir.path().join(".cargo/bin");
+
+        std::fs::create_dir_all(cargo_home.join("bin")).unwrap();
+        std::fs::create_dir_all(&rustup_home).unwrap();
+        std::fs::create_dir_all(&path_dir).unwrap();
+        std::fs::create_dir_all(home_dir.join(".cargo/bin")).unwrap();
+        std::fs::create_dir_all(&sibling_cargo_bin).unwrap();
+
+        let cargo_rustc = cargo_home.join("bin/rustc");
+        let path_rustc = path_dir.join("rustc");
+        let home_rustc = home_dir.join(".cargo/bin/rustc");
+        let sibling_rustc = sibling_cargo_bin.join("rustc");
+        std::fs::write(&cargo_rustc, b"").unwrap();
+        std::fs::write(&path_rustc, b"").unwrap();
+        std::fs::write(&home_rustc, b"").unwrap();
+        std::fs::write(&sibling_rustc, b"").unwrap();
+
+        let explicit = Path::new("/custom/bin/rustc");
+        assert_eq!(
+            WorkerConfig::resolve_rustc_bin_from(
+                Some(explicit),
+                Some(&cargo_home),
+                Some(&rustup_home),
+                Some(path_dir.as_os_str()),
+                Some(&home_dir),
+            ),
+            explicit
+        );
+
+        assert_eq!(
+            WorkerConfig::resolve_rustc_bin_from(
+                None,
+                Some(&cargo_home),
+                Some(&rustup_home),
+                Some(path_dir.as_os_str()),
+                Some(&home_dir),
+            ),
+            cargo_rustc
+        );
+
+        assert_eq!(
+            WorkerConfig::resolve_rustc_bin_from(
+                None,
+                Some(&dir.path().join("empty-cargo")),
+                Some(&rustup_home),
+                Some(path_dir.as_os_str()),
+                Some(&home_dir),
+            ),
+            path_rustc
+        );
+
+        assert_eq!(
+            WorkerConfig::resolve_rustc_bin_from(
+                None,
+                None,
+                Some(&rustup_home),
+                None,
+                Some(&home_dir),
+            ),
+            sibling_rustc
+        );
+
+        let empty_rustup = dir.path().join("isolated/rustup");
+        std::fs::create_dir_all(&empty_rustup).unwrap();
+        assert_eq!(
+            WorkerConfig::resolve_rustc_bin_from(
+                None,
+                None,
+                Some(&empty_rustup),
+                None,
+                Some(&home_dir),
+            ),
+            home_rustc
+        );
+
+        let cmd = WorkerConfig::build_rustc_probe_command(
+            &cargo_rustc,
+            Some(&rustup_home),
+            Some(&cargo_home),
+        );
+        assert_eq!(cmd.get_program(), cargo_rustc.as_os_str());
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, vec![std::ffi::OsStr::new("--version")]);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("RUSTUP_HOME"))
+                .copied()
+                .flatten(),
+            Some(rustup_home.as_os_str())
+        );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("CARGO_HOME"))
+                .copied()
+                .flatten(),
+            Some(cargo_home.as_os_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_probe_rustc_semver_with_mock_outputs_and_fail_soft() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let bin = Path::new("/var/lib/action-runner/.cargo/bin/rustc");
+
+        let stable = WorkerConfig::probe_rustc_semver_with(bin, || {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: b"rustc 1.86.0 (05f9846f8 2025-03-31)\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+        assert_eq!(stable, Some("1.86.0".to_string()));
+
+        let nightly = WorkerConfig::probe_rustc_semver_with(bin, || {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: b"rustc 1.88.0-nightly (123456789 2025-05-01)\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+        assert_eq!(nightly, Some("1.88.0-nightly".to_string()));
+
+        let failed_exit = WorkerConfig::probe_rustc_semver_with(bin, || {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: Vec::new(),
+                stderr: b"error: no default toolchain configured".to_vec(),
+            })
+        });
+        assert_eq!(failed_exit, None);
+
+        let malformed_stdout = WorkerConfig::probe_rustc_semver_with(bin, || {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: b"garbage output\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+        assert_eq!(malformed_stdout, None);
+
+        let invalid_utf8 = WorkerConfig::probe_rustc_semver_with(bin, || {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: vec![0xff, 0xfe],
+                stderr: Vec::new(),
+            })
+        });
+        assert_eq!(invalid_utf8, None);
+
+        let spawn_err = WorkerConfig::probe_rustc_semver_with(bin, || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "rustc missing",
+            ))
+        });
+        assert_eq!(spawn_err, None);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_probe_rustc_semver_live_and_isolated_fail_soft() {
+        // Missing binary fails soft cleanly without panicking.
+        assert_eq!(
+            WorkerConfig::probe_rustc_semver_for(
+                Path::new("/nonexistent/action-runner-missing-rustc"),
+                None,
+                None,
+            ),
+            None
+        );
+
+        if let Some(semver) = WorkerConfig::probe_rustc_semver() {
+            assert!(
+                is_valid_semver(&semver),
+                "Detected rustc semver must be valid semver: {semver}"
+            );
+        }
     }
 }

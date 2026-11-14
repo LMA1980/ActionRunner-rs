@@ -24,6 +24,7 @@ fn make_test_config(ws_url: String, node_id: &str) -> (WorkerConfig, tempfile::T
         toolchains: vec!["system".to_string()],
         use_btrfs: false,
         isolation_mode: IsolationMode::None,
+        rust_semver: None,
     };
     (config, temp_workspace)
 }
